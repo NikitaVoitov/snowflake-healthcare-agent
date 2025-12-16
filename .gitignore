@@ -1,0 +1,132 @@
+# ---------------------------
+# OS / Editor / Tooling
+# ---------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+.idea/
+.vscode/
+.history/
+.cursor/
+.mcp/
+
+# ---------------------------
+# Python / Build Artifacts
+# ---------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+.eggs/
+*.egg-info/
+dist/
+build/
+.wheelhouse/
+.manifest
+*.spec
+
+# Environments
+.venv/
+venv/
+env/
+.conda/
+.python-version
+
+# Linters / Test / Coverage / Caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.gitlint
+
+# ---------------------------
+# Jupyter / Notebooks
+# ---------------------------
+.ipynb_checkpoints/
+.jupyter/
+.jupyter_ystore.db
+.jupyter_*store.db
+
+# Project-specific notebook artifacts
+notebooks/ffmpeg_install.sh
+notebooks/payer_setup.ipynb
+
+# ---------------------------
+# Streamlit
+# ---------------------------
+.streamlit/secrets.toml
+
+# ---------------------------
+# Logs and runtime
+# ---------------------------
+logs/
+*.log
+*.out
+*.err
+*.pid
+tmp/
+temp/
+**/tmp/
+**/temp/
+
+# ---------------------------
+# LangGraph / Orchestration (local state)
+# ---------------------------
+checkpoints/
+state/
+.artifacts/
+.data/
+
+# ---------------------------
+# Credentials / Secrets (FastAPI, SPCS, Snowflake, etc.)
+# ---------------------------
+.env
+.env.*
+!.env.example
+secrets/
+**/secrets.*
+**/*_secrets.*
+*.key
+*.pem
+*.crt
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+
+# ---------------------------
+# SQL/DB scratch (keep versioned SQL in scripts/sql)
+# ---------------------------
+*.sqlite
+*.db
+*.db-journal
+
+# ---------------------------
+# Project-specific files to ignore (as marked)
+# ---------------------------
+=0.1.4
+impl_plan_final.md
+TODO.md
+
+# ---------------------------
+# Keep these tracked
+# ---------------------------
+!uv.lock
+!langgraph.json
+
+# Cursor
+.cursor
+.mcp
+.vscode
