@@ -16,9 +16,12 @@ WORKDIR /app
 # Copy dependency files first (better layer caching)
 COPY pyproject.toml uv.lock ./
 
-# Install SPCS dependencies only (frozen = exact versions from lock file)
-# --no-dev excludes dev dependencies, --group spcs includes SPCS-specific deps
-RUN uv sync --frozen --no-dev --group spcs
+# Install dependencies only (not the local package - we copy src/ separately)
+# --frozen = exact versions from lock file
+# --no-dev = exclude dev dependencies  
+# --extra spcs = include SPCS-specific deps
+# --no-install-project = skip editable install of local package
+RUN uv sync --frozen --no-dev --extra spcs --no-install-project
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Minimal production image

@@ -2,19 +2,54 @@
 
 import logging
 import os
+from pathlib import Path
 
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
+from src.config import is_running_in_spcs
 
 logger = logging.getLogger(__name__)
 
 
-def get_snowflake_connection_params() -> dict:
-    """Build Snowflake connection parameters from environment.
+def get_spcs_connection_params() -> dict:
+    """Build Snowflake connection parameters for SPCS environment.
+
+    In SPCS, authentication is handled via the service identity token.
+
+    Returns:
+        Dictionary with SPCS connection parameters
+    """
+    # Read the OAuth token from the SPCS token file
+    token_path = Path("/snowflake/session/token")
+    if not token_path.exists():
+        raise ValueError("SPCS token file not found at /snowflake/session/token")
+
+    token = token_path.read_text().strip()
+
+    # SPCS provides host via environment variable
+    host = os.getenv("SNOWFLAKE_HOST")
+    if not host:
+        raise ValueError("SNOWFLAKE_HOST environment variable not set in SPCS")
+
+    return {
+        "host": host,
+        "authenticator": "oauth",
+        "token": token,
+        "database": os.getenv("SNOWFLAKE_DATABASE", "HEALTHCARE_DB"),
+        "schema": "CHECKPOINT_SCHEMA",
+        "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "PAYERS_CC_WH"),
+    }
+
+
+def get_local_connection_params() -> dict:
+    """Build Snowflake connection parameters for local development.
+
+    Uses key-pair authentication.
 
     Returns:
         Dictionary with connection parameters including private_key bytes
     """
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+
     private_key_path = os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH")
     passphrase = os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
 
@@ -46,6 +81,22 @@ def get_snowflake_connection_params() -> dict:
     }
 
 
+def get_snowflake_connection_params() -> dict:
+    """Build Snowflake connection parameters based on environment.
+
+    Automatically detects SPCS vs local environment.
+
+    Returns:
+        Dictionary with appropriate connection parameters
+    """
+    if is_running_in_spcs():
+        logger.info("Detected SPCS environment, using OAuth token authentication")
+        return get_spcs_connection_params()
+    else:
+        logger.info("Local environment detected, using key-pair authentication")
+        return get_local_connection_params()
+
+
 async def create_checkpointer():
     """Create AsyncSnowflakeSaver for LangGraph checkpointing.
 
@@ -75,4 +126,3 @@ async def create_checkpointer():
         from langgraph.checkpoint.memory import MemorySaver
 
         return MemorySaver()
-

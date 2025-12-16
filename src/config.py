@@ -1,6 +1,16 @@
 """Configuration module using pydantic-settings for Healthcare Multi-Agent Lab."""
 
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def is_running_in_spcs() -> bool:
+    """Detect if running inside Snowpark Container Services."""
+    # SPCS containers have specific environment variables set by Snowflake
+    return os.environ.get("SNOWFLAKE_HOST") is not None or os.path.exists(
+        "/snowflake/session/token"
+    )
 
 
 class Settings(BaseSettings):
@@ -13,15 +23,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Snowflake connection
-    snowflake_account: str
-    snowflake_user: str
-    snowflake_private_key_path: str
-    snowflake_private_key_passphrase: str
+    # Snowflake connection - required for local, optional for SPCS
+    snowflake_account: str | None = None
+    snowflake_user: str | None = None
+    snowflake_private_key_path: str | None = None
+    snowflake_private_key_passphrase: str | None = None
     snowflake_database: str = "HEALTHCARE_DB"
     snowflake_schema: str = "PUBLIC"
     snowflake_warehouse: str = "PAYERS_CC_WH"
     snowflake_role: str = "ACCOUNTADMIN"
+
+    # SPCS-specific settings (auto-detected)
+    is_spcs: bool = False
 
     # Agent settings
     max_agent_steps: int = 3
@@ -35,7 +48,10 @@ class Settings(BaseSettings):
     langchain_tracing_v2: bool = False
     langchain_api_key: str | None = None
 
+    def model_post_init(self, _context: object) -> None:
+        """Post-initialization to detect SPCS environment."""
+        object.__setattr__(self, "is_spcs", is_running_in_spcs())
+
 
 # Singleton instance
 settings = Settings()
-
