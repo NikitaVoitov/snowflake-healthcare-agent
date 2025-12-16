@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "healthcare_workflow": "./src/graphs/workflow.py:healthcare_graph"
+  },
+  "env": ".env"
+}
+
