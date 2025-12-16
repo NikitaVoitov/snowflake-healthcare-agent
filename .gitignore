@@ -88,6 +88,7 @@ checkpoints/
 state/
 .artifacts/
 .data/
+.langgraph_api
 
 # ---------------------------
 # Credentials / Secrets (FastAPI, SPCS, Snowflake, etc.)
@@ -125,8 +126,6 @@ TODO.md
 # ---------------------------
 !uv.lock
 !langgraph.json
-
-.langgraph_api
 
 # Cursor
 .cursor
