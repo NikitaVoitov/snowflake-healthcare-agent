@@ -67,6 +67,7 @@ def initial_state() -> HealthcareAgentState:
         last_error=None,
         has_error=False,
         is_complete=False,
+        should_escalate=False,
     )
 
 
@@ -89,6 +90,7 @@ def analyst_query_state() -> HealthcareAgentState:
         last_error=None,
         has_error=False,
         is_complete=False,
+        should_escalate=False,
     )
 
 
@@ -111,6 +113,7 @@ def search_query_state() -> HealthcareAgentState:
         last_error=None,
         has_error=False,
         is_complete=False,
+        should_escalate=False,
     )
 
 
@@ -133,6 +136,7 @@ def error_state() -> HealthcareAgentState:
         last_error={"error_type": "cortex_api", "message": "Service unavailable"},
         has_error=True,
         is_complete=False,
+        should_escalate=False,
     )
 
 
@@ -240,6 +244,7 @@ def mock_compiled_graph() -> AsyncMock:
         "last_error": None,
         "has_error": False,
         "is_complete": True,
+        "should_escalate": False,
     }
     
     async def mock_stream(*args, **kwargs) -> AsyncIterator[dict]:

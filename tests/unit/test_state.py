@@ -27,6 +27,7 @@ class TestHealthcareAgentState:
             "last_error": None,
             "has_error": False,
             "is_complete": False,
+            "should_escalate": False,
         }
         assert state["user_query"] == "test query"
 
@@ -48,6 +49,7 @@ class TestHealthcareAgentState:
             "last_error": None,
             "has_error": False,
             "is_complete": False,
+            "should_escalate": False,
         }
         assert state["member_id"] == "ABC123"
 
@@ -83,6 +85,7 @@ class TestHealthcareAgentState:
             "last_error": None,
             "has_error": False,
             "is_complete": False,
+            "should_escalate": False,
         }
         assert len(state["messages"]) == 2
 
@@ -104,6 +107,7 @@ class TestHealthcareAgentState:
             "last_error": {"error_type": "cortex_api", "message": "Rate limit"},
             "has_error": True,
             "is_complete": False,
+            "should_escalate": False,
         }
         assert state["has_error"] is True
         assert state["error_count"] == 2
@@ -126,6 +130,7 @@ class TestHealthcareAgentState:
             "last_error": None,
             "has_error": False,
             "is_complete": True,
+            "should_escalate": False,
         }
         assert state["is_complete"] is True
         assert state["final_response"] != ""
@@ -148,6 +153,7 @@ class TestHealthcareAgentState:
             "last_error": None,
             "has_error": False,
             "is_complete": False,
+            "should_escalate": False,
         }
         assert state["analyst_results"] is not None
         assert state["search_results"] is not None

@@ -107,6 +107,7 @@ class TestResponseAgent:
             "last_error": None,
             "has_error": False,
             "is_complete": False,
+            "should_escalate": False,
         }
         result = await async_response_agent(state)
         assert "final_response" in result
@@ -131,6 +132,7 @@ class TestResponseAgent:
             "last_error": None,
             "has_error": False,
             "is_complete": False,
+            "should_escalate": False,
         }
         result = await async_response_agent(state)
         assert "final_response" in result
@@ -154,6 +156,7 @@ class TestResponseAgent:
             "last_error": None,
             "has_error": False,
             "is_complete": False,
+            "should_escalate": False,
         }
         result = await async_response_agent(state)
         assert result["is_complete"] is True
@@ -181,6 +184,7 @@ class TestErrorHandler:
             "last_error": {"retriable": True, "message": "Timeout"},
             "has_error": True,
             "is_complete": False,
+            "should_escalate": False,
         }
         result = await error_handler_node(state)
         assert result.get("current_step") == "retry"
@@ -204,6 +208,7 @@ class TestErrorHandler:
             "last_error": {"retriable": False, "message": "Fatal error"},
             "has_error": True,
             "is_complete": False,
+            "should_escalate": False,
         }
         result = await error_handler_node(state)
         assert result.get("should_escalate") is True
@@ -227,6 +232,7 @@ class TestErrorHandler:
             "last_error": {"retriable": True, "message": "Still failing"},
             "has_error": True,
             "is_complete": False,
+            "should_escalate": False,
         }
         result = await error_handler_node(state)
         assert result.get("should_escalate") is True
@@ -263,6 +269,7 @@ class TestRouteToAgents:
             "last_error": None,
             "has_error": False,
             "is_complete": False,
+            "should_escalate": False,
         }
         result = route_to_agents(state)
         assert result == "parallel"
