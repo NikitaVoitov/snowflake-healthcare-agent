@@ -126,6 +126,8 @@ TODO.md
 !uv.lock
 !langgraph.json
 
+.langgraph_api
+
 # Cursor
 .cursor
 .mcp
