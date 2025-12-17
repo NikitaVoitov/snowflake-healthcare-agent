@@ -40,11 +40,15 @@ async def sf_query_agent(
 ) -> JSONResponse:
     """Snowflake Service Function endpoint for SQL-based agent calls.
 
-    Accepts Snowflake's batch format: {"data": [[row_index, query, member_id], ...]}
+    Accepts Snowflake's batch format: {"data": [[row_index, query, member_id, thread_id], ...]}
     Returns Snowflake's response format: {"data": [[row_index, result], ...]}
 
     This endpoint enables calling the agent via SQL:
-        SELECT HEALTHCARE_AGENT_QUERY('What is my deductible?', 'ABC1001');
+        -- New conversation
+        SELECT HEALTHCARE_AGENT_QUERY('What is my deductible?', '106742775');
+        
+        -- Continue conversation (pass thread_id from previous response)
+        SELECT HEALTHCARE_AGENT_QUERY('And what about copay?', '106742775', 'previous-thread-id');
     """
     try:
         body = await request.json()
@@ -59,6 +63,7 @@ async def sf_query_agent(
             row_index = row[0]
             query_text = row[1] if len(row) > 1 else ""
             member_id = row[2] if len(row) > 2 else None
+            thread_id = row[3] if len(row) > 3 else None
 
             # Skip empty queries
             if not query_text or not query_text.strip():
@@ -72,6 +77,7 @@ async def sf_query_agent(
                     member_id=member_id,
                     tenant_id="sf_function",
                     user_id="sql_caller",
+                    thread_id=thread_id,
                 )
                 response = await service.execute(query_request, checkpointer)
                 results.append([row_index, response.model_dump()])
@@ -168,4 +174,3 @@ async def stream_agent(
             "Connection": "keep-alive",
         },
     )
-
