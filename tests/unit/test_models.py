@@ -67,8 +67,8 @@ class TestQueryRequest:
 
     def test_member_id_pattern_valid(self) -> None:
         """Valid member ID patterns should pass."""
-        request = QueryRequest(query="test", member_id="ABC123")
-        assert request.member_id == "ABC123"
+        request = QueryRequest(query="test", member_id="106742775")
+        assert request.member_id == "106742775"
 
     def test_member_id_pattern_invalid(self) -> None:
         """Invalid member ID patterns should fail."""
@@ -92,7 +92,7 @@ class TestStreamRequest:
 
     def test_inherits_query_request(self) -> None:
         """StreamRequest should inherit QueryRequest fields."""
-        request = StreamRequest(query="test", member_id="ABC123")
+        request = StreamRequest(query="test", member_id="106742775")
         assert request.query == "test"
 
     def test_include_intermediate_default(self) -> None:

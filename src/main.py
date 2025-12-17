@@ -24,13 +24,34 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):  # noqa: ARG001
     """Lifespan context manager for startup/shutdown.
 
-    Startup: Pre-compile graph, warm caches
+    Startup: Pre-compile graph, warm caches, setup checkpointer tables, init Snowpark
     Shutdown: Cleanup resources
     """
     # Startup
     logger.info("Starting Healthcare Multi-Agent Service")
     logger.info(f"Snowflake account: {settings.snowflake_account}")
     logger.info(f"Database: {settings.snowflake_database}")
+
+    # Initialize Snowpark session for Cortex tools
+    from src.graphs.workflow import set_snowpark_session
+
+    try:
+        snowpark_session = _create_snowpark_session()
+        set_snowpark_session(snowpark_session)
+        logger.info("Snowpark session initialized for Cortex tools")
+    except Exception as e:
+        logger.warning(f"Snowpark session init failed (tools will use mocks): {e}")
+
+    # Setup checkpointer tables (idempotent - creates if not exist)
+    from src.dependencies import get_checkpointer
+
+    checkpointer = get_checkpointer()
+    if hasattr(checkpointer, "asetup"):
+        try:
+            await checkpointer.asetup()
+            logger.info("Checkpointer tables verified/created")
+        except Exception as e:
+            logger.warning(f"Checkpointer setup warning: {e}")
 
     # Pre-compile graph to warm cache
     _ = get_compiled_graph()
@@ -40,6 +61,67 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     # Shutdown
     logger.info("Shutting down Healthcare Multi-Agent Service")
+
+
+def _create_snowpark_session():
+    """Create Snowpark session based on environment (SPCS vs local)."""
+    import os
+    from pathlib import Path
+
+    from snowflake.snowpark import Session
+
+    from src.config import is_running_in_spcs
+
+    if is_running_in_spcs():
+        # SPCS uses OAuth token authentication
+        token_path = Path("/snowflake/session/token")
+        if not token_path.exists():
+            raise ValueError("SPCS token file not found")
+
+        token = token_path.read_text().strip()
+        host = os.getenv("SNOWFLAKE_HOST", "")
+        if not host:
+            raise ValueError("SNOWFLAKE_HOST not set in SPCS")
+
+        logger.info("Creating Snowpark session with SPCS OAuth token")
+        return Session.builder.configs({
+            "account": host.replace(".snowflakecomputing.com", ""),
+            "host": host,
+            "authenticator": "oauth",
+            "token": token,
+            "database": settings.snowflake_database,
+            "warehouse": settings.snowflake_warehouse,
+        }).create()
+    else:
+        # Local uses key-pair auth
+        from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives import serialization
+
+        if not settings.snowflake_private_key_path:
+            raise ValueError("SNOWFLAKE_PRIVATE_KEY_PATH required for local Snowpark")
+
+        with open(settings.snowflake_private_key_path, "rb") as f:
+            private_key = serialization.load_pem_private_key(
+                f.read(),
+                password=(settings.snowflake_private_key_passphrase.encode()
+                          if settings.snowflake_private_key_passphrase else None),
+                backend=default_backend(),
+            )
+
+        private_key_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+
+        logger.info("Creating Snowpark session with key-pair auth")
+        return Session.builder.configs({
+            "account": settings.snowflake_account,
+            "user": settings.snowflake_user,
+            "private_key": private_key_bytes,
+            "database": settings.snowflake_database,
+            "warehouse": settings.snowflake_warehouse,
+        }).create()
 
 
 app = FastAPI(

@@ -35,7 +35,7 @@ class TestHealthcareAgentState:
         """Should accept member_id for member-specific queries."""
         state: HealthcareAgentState = {
             "user_query": "What are my claims?",
-            "member_id": "ABC123",
+            "member_id": "106742775",
             "messages": [],
             "plan": "analyst",
             "analyst_results": None,
@@ -51,7 +51,7 @@ class TestHealthcareAgentState:
             "is_complete": False,
             "should_escalate": False,
         }
-        assert state["member_id"] == "ABC123"
+        assert state["member_id"] == "106742775"
 
     def test_state_update_immutability(self, initial_state: HealthcareAgentState) -> None:
         """State updates should create new dict, not mutate."""
@@ -116,7 +116,7 @@ class TestHealthcareAgentState:
         """Completed state should have final_response and is_complete."""
         state: HealthcareAgentState = {
             "user_query": "What is my deductible?",
-            "member_id": "ABC123",
+            "member_id": "106742775",
             "messages": [],
             "plan": "analyst",
             "analyst_results": {"deductible": 500.00},

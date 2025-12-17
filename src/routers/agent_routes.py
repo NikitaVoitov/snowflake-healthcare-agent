@@ -2,9 +2,10 @@
 
 import json
 import logging
+from typing import Any
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.dependencies import AgentServiceDep, CheckpointerDep
 from src.models.requests import QueryRequest, StreamRequest
@@ -13,6 +14,66 @@ from src.models.responses import AgentResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# =============================================================================
+# Snowflake Service Function Endpoint (Batch Format)
+# =============================================================================
+@router.post("/sf-query")
+async def sf_query_agent(
+    request: Request,
+    service: AgentServiceDep,
+    checkpointer: CheckpointerDep,
+) -> JSONResponse:
+    """Snowflake Service Function endpoint for SQL-based agent calls.
+
+    Accepts Snowflake's batch format: {"data": [[row_index, query, member_id], ...]}
+    Returns Snowflake's response format: {"data": [[row_index, result], ...]}
+
+    This endpoint enables calling the agent via SQL:
+        SELECT HEALTHCARE_AGENT_QUERY('What is my deductible?', 'ABC1001');
+    """
+    try:
+        body = await request.json()
+        data = body.get("data", [])
+
+        if not data:
+            return JSONResponse(content={"data": []})
+
+        results: list[list[Any]] = []
+
+        for row in data:
+            row_index = row[0]
+            query_text = row[1] if len(row) > 1 else ""
+            member_id = row[2] if len(row) > 2 else None
+
+            # Skip empty queries
+            if not query_text or not query_text.strip():
+                results.append([row_index, {"error": "Empty query"}])
+                continue
+
+            try:
+                # Create QueryRequest and execute
+                query_request = QueryRequest(
+                    query=query_text,
+                    member_id=member_id,
+                    tenant_id="sf_function",
+                    user_id="sql_caller",
+                )
+                response = await service.execute(query_request, checkpointer)
+                results.append([row_index, response.model_dump()])
+            except Exception as e:
+                logger.error(f"Row {row_index} failed: {e}")
+                results.append([row_index, {"error": str(e)}])
+
+        return JSONResponse(content={"data": results})
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e
+    except Exception as e:
+        logger.error(f"SF query failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/query", response_model=AgentResponse, status_code=200)

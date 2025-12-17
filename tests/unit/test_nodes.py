@@ -93,7 +93,7 @@ class TestResponseAgent:
         """Should synthesize response from analyst results."""
         state: HealthcareAgentState = {
             "user_query": "What are my claims?",
-            "member_id": "ABC123",
+            "member_id": "106742775",
             "messages": [],
             "plan": "analyst",
             "analyst_results": {"claims": [{"claim_id": "CLM001"}]},

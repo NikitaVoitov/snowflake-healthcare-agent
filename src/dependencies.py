@@ -26,23 +26,25 @@ def get_settings() -> Settings:
 
 
 @lru_cache
-def get_compiled_graph() -> Pregel:
-    """Build and cache the compiled healthcare graph.
+def get_checkpointer() -> Any:
+    """Create and cache checkpointer for the application.
 
     Returns:
-        Compiled StateGraph (Pregel instance) ready for execution
+        CustomAsyncSnowflakeSaver for persistent checkpoints, or MemorySaver fallback
+    """
+    return create_checkpointer()
+
+
+@lru_cache
+def get_compiled_graph() -> Pregel:
+    """Build and cache the compiled healthcare graph WITH checkpointer.
+
+    Returns:
+        Compiled StateGraph (Pregel instance) with checkpointing enabled
     """
     logger.info("Compiling healthcare workflow graph")
-    return create_healthcare_graph().compile()
-
-
-async def get_checkpointer() -> Any:
-    """Create async checkpointer for each request.
-
-    Returns:
-        AsyncSnowflakeSaver or MemorySaver fallback
-    """
-    return await create_checkpointer()
+    checkpointer = get_checkpointer()
+    return create_healthcare_graph().compile(checkpointer=checkpointer)
 
 
 def get_agent_service(

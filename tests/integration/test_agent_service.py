@@ -30,7 +30,7 @@ class TestAgentServiceExecute:
     @pytest.mark.asyncio
     async def test_execute_with_member_id(self, agent_service: AgentService) -> None:
         """execute() should handle member-specific queries."""
-        request = QueryRequest(query="What are my claims?", member_id="ABC123")
+        request = QueryRequest(query="What are my claims?", member_id="106742775")
         result = await agent_service.execute(request)
         assert isinstance(result, AgentResponse)
 

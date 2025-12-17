@@ -53,7 +53,7 @@ def initial_state() -> HealthcareAgentState:
     """Create minimal initial state for testing."""
     return HealthcareAgentState(
         user_query="What are my benefits?",
-        member_id="ABC123",
+        member_id="106742775",
         messages=[],
         plan="",
         analyst_results=None,
@@ -148,7 +148,7 @@ def sample_query_request() -> QueryRequest:
     """Create sample query request."""
     return QueryRequest(
         query="What are my coverage benefits for physical therapy?",
-        member_id="ABC123",
+        member_id="106742775",
         tenant_id="default",
         user_id="test_user",
     )
@@ -177,7 +177,7 @@ def mock_analyst_tool() -> AsyncMock:
     """Mock AsyncCortexAnalystTool."""
     mock = AsyncMock()
     mock.execute.return_value = {
-        "member_id": "ABC123",
+        "member_id": "106742775",
         "claims": [
             {"claim_id": "CLM001", "amount": 150.00, "status": "approved"},
             {"claim_id": "CLM002", "amount": 75.50, "status": "pending"},
@@ -187,7 +187,7 @@ def mock_analyst_tool() -> AsyncMock:
             "deductible_met": 250.00,
             "out_of_pocket_max": 3000.00,
         },
-        "raw_response": "Member ABC123 has 2 claims...",
+        "raw_response": "Member 106742775 has 2 claims...",
     }
     return mock
 
@@ -230,7 +230,7 @@ def mock_compiled_graph() -> AsyncMock:
     mock = AsyncMock()
     mock.ainvoke.return_value = {
         "user_query": "What are my benefits?",
-        "member_id": "ABC123",
+        "member_id": "106742775",
         "messages": [],
         "plan": "both",
         "analyst_results": {"coverage": {}},

@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
+from snowflake.snowpark import Session
 
 from src.config import settings
 from src.graphs.state import HealthcareAgentState
@@ -24,8 +25,20 @@ from src.models.agent_types import (
     ErrorType,
     SearchResultModel,
 )
+from src.services.cortex_tools import AsyncCortexAnalystTool, AsyncCortexSearchTool
 
 logger = logging.getLogger(__name__)
+
+# Module-level session holder for dependency injection
+# Set via set_snowpark_session() at app startup
+_snowpark_session: Session | None = None
+
+
+def set_snowpark_session(session: Session) -> None:
+    """Set the Snowpark session for Cortex tools (called at app startup)."""
+    global _snowpark_session  # noqa: PLW0603
+    _snowpark_session = session
+    logger.info("Snowpark session configured for workflow nodes")
 
 # --- Agent Functions ---
 
@@ -64,24 +77,33 @@ async def async_analyst_agent(state: HealthcareAgentState) -> dict:
     """Execute Cortex Analyst for member queries.
 
     Queries member data from MEMBER_SCHEMA tables using
-    Cortex Analyst for natural language to SQL translation.
+    real Snowflake Cortex tools when session is available.
     """
     plan = state.get("plan", "")
     if plan not in ["analyst", "both"]:
         return {}
 
+    member_id = state.get("member_id")
+    query = state.get("user_query", "")
+
     try:
-        # Mock implementation - in production, use AsyncCortexAnalystTool
-        member_id = state.get("member_id")
-        results = {
-            "member_id": member_id,
-            "claims": [],
-            "coverage": {"plan": "Gold", "deductible": 500, "copay_office": 25},
-        }
+        # Use real Cortex tools if session is available
+        if _snowpark_session is not None:
+            analyst_tool = AsyncCortexAnalystTool(_snowpark_session)
+            results = await analyst_tool.execute(query, member_id)
+            logger.info(f"Analyst executed real query for member: {member_id}")
+        else:
+            # Fallback to mock for testing/development
+            logger.warning("No Snowpark session - using mock analyst results")
+            results = {
+                "member_id": member_id,
+                "claims": [],
+                "coverage": {"plan": "Gold", "deductible": 500, "copay_office": 25},
+                "raw_response": None,
+            }
 
         # Validate with Pydantic model
         validated = AnalystResultModel(**results)
-        logger.info(f"Analyst completed for member: {member_id}")
         return {"analyst_results": validated.model_dump(), "current_step": "analyst"}
 
     except TimeoutError:
@@ -121,31 +143,38 @@ async def async_search_agent(state: HealthcareAgentState) -> dict:
     """Execute Cortex Search for knowledge queries.
 
     Searches across FAQs, policies, and call transcripts
-    using Cortex Search for semantic similarity.
+    using real Snowflake Cortex Search when session is available.
     """
     plan = state.get("plan", "")
     if plan not in ["search", "both"]:
         return {}
 
+    query = state.get("user_query", "")
+
     try:
-        # Mock implementation - in production, use AsyncCortexSearchTool
-        query = state.get("user_query", "")
-        results = [
-            {
-                "text": f"Policy content relevant to: {query[:50]}...",
-                "score": 0.95,
-                "source": "policies",
-            },
-            {
-                "text": "FAQ: How to file an appeal...",
-                "score": 0.88,
-                "source": "faqs",
-            },
-        ]
+        # Use real Cortex Search if session is available
+        if _snowpark_session is not None:
+            search_tool = AsyncCortexSearchTool(_snowpark_session)
+            results = await search_tool.execute(query, limit=5)
+            logger.info(f"Search executed real query with {len(results)} results")
+        else:
+            # Fallback to mock for testing/development
+            logger.warning("No Snowpark session - using mock search results")
+            results = [
+                {
+                    "text": f"Policy content relevant to: {query[:50]}...",
+                    "score": 0.95,
+                    "source": "policies",
+                },
+                {
+                    "text": "FAQ: How to file an appeal...",
+                    "score": 0.88,
+                    "source": "faqs",
+                },
+            ]
 
         # Validate with Pydantic models
         validated = [SearchResultModel(**r) for r in results]
-        logger.info(f"Search completed with {len(validated)} results")
         return {
             "search_results": [r.model_dump() for r in validated],
             "current_step": "search",
@@ -430,6 +459,72 @@ def create_healthcare_graph() -> StateGraph:
 
     return workflow
 
+
+# Initialize Snowpark session at module load time for langgraph dev
+def _initialize_snowpark_session() -> None:
+    """Initialize Snowpark session from environment variables."""
+    global _snowpark_session  # noqa: PLW0603
+    if _snowpark_session is not None:
+        return  # Already initialized
+    
+    try:
+        from src.config import settings
+        import os
+        from pathlib import Path
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+        
+        # Check if running in SPCS (OAuth token available)
+        if os.environ.get("SNOWFLAKE_TOKEN"):
+            logger.info("Creating Snowpark session with SPCS OAuth token")
+            _snowpark_session = Session.builder.configs({
+                "account": settings.snowflake_account,
+                "token": os.environ.get("SNOWFLAKE_TOKEN"),
+                "authenticator": "oauth",
+                "database": settings.snowflake_database,
+                "schema": settings.snowflake_schema,
+                "warehouse": settings.snowflake_warehouse,
+            }).create()
+        elif settings.snowflake_private_key_path:
+            logger.info("Creating Snowpark session with key-pair authentication")
+            
+            # Load private key from file
+            key_path = Path(settings.snowflake_private_key_path).expanduser()
+            with open(key_path, "rb") as key_file:
+                passphrase = settings.snowflake_private_key_passphrase
+                p_key = serialization.load_pem_private_key(
+                    key_file.read(),
+                    password=passphrase.encode() if passphrase else None,
+                    backend=default_backend()
+                )
+            
+            # Serialize to DER format for Snowpark
+            pkb = p_key.private_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            
+            _snowpark_session = Session.builder.configs({
+                "account": settings.snowflake_account,
+                "user": settings.snowflake_user,
+                "private_key": pkb,
+                "database": settings.snowflake_database,
+                "schema": settings.snowflake_schema,
+                "warehouse": settings.snowflake_warehouse,
+                "role": settings.snowflake_role,
+            }).create()
+        else:
+            logger.warning("No Snowflake credentials configured - using mock mode")
+            return
+        
+        logger.info("Snowpark session initialized successfully")
+    except Exception as exc:
+        logger.warning(f"Failed to initialize Snowpark session: {exc}")
+
+
+# Initialize session on module load
+_initialize_snowpark_session()
 
 # Export compiled graph for langgraph.json
 healthcare_graph = create_healthcare_graph().compile()
