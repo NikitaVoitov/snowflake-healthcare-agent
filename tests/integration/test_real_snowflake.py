@@ -64,14 +64,16 @@ class TestRealSnowflakeDataTypes:
             encryption_algorithm=serialization.NoEncryption(),
         )
 
-        session = Session.builder.configs({
-            "account": os.getenv("SNOWFLAKE_ACCOUNT"),
-            "user": os.getenv("SNOWFLAKE_USER"),
-            "private_key": pkb,
-            "database": os.getenv("SNOWFLAKE_DATABASE", "HEALTHCARE_DB"),
-            "schema": os.getenv("SNOWFLAKE_SCHEMA", "MEMBER_SCHEMA"),
-            "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "PAYERS_CC_WH"),
-        }).create()
+        session = Session.builder.configs(
+            {
+                "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+                "user": os.getenv("SNOWFLAKE_USER"),
+                "private_key": pkb,
+                "database": os.getenv("SNOWFLAKE_DATABASE", "HEALTHCARE_DB"),
+                "schema": os.getenv("SNOWFLAKE_SCHEMA", "MEMBER_SCHEMA"),
+                "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "PAYERS_CC_WH"),
+            }
+        ).create()
 
         yield session
         session.close()
@@ -160,6 +162,7 @@ class TestRealHTTPEndpoints:
         """
         # Clear caches to avoid event loop binding issues
         from src.dependencies import get_checkpointer, get_compiled_graph, get_settings
+
         get_settings.cache_clear()
         get_compiled_graph.cache_clear()
         get_checkpointer.cache_clear()
@@ -291,14 +294,16 @@ class TestRealCortexTools:
             encryption_algorithm=serialization.NoEncryption(),
         )
 
-        session = Session.builder.configs({
-            "account": os.getenv("SNOWFLAKE_ACCOUNT"),
-            "user": os.getenv("SNOWFLAKE_USER"),
-            "private_key": pkb,
-            "database": os.getenv("SNOWFLAKE_DATABASE", "HEALTHCARE_DB"),
-            "schema": os.getenv("SNOWFLAKE_SCHEMA", "MEMBER_SCHEMA"),
-            "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "PAYERS_CC_WH"),
-        }).create()
+        session = Session.builder.configs(
+            {
+                "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+                "user": os.getenv("SNOWFLAKE_USER"),
+                "private_key": pkb,
+                "database": os.getenv("SNOWFLAKE_DATABASE", "HEALTHCARE_DB"),
+                "schema": os.getenv("SNOWFLAKE_SCHEMA", "MEMBER_SCHEMA"),
+                "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "PAYERS_CC_WH"),
+            }
+        ).create()
 
         yield session
         session.close()
@@ -369,11 +374,14 @@ class TestRealCheckpointer:
         thread_id = f"real-test-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         config = {"configurable": {"thread_id": thread_id}}
 
-        result = await graph.ainvoke({
-            "messages": [{"role": "user", "content": "What are my claims?"}],
-            "member_id": "106742775",
-            "user_query": "What are my claims?",
-        }, config=config)
+        result = await graph.ainvoke(
+            {
+                "messages": [{"role": "user", "content": "What are my claims?"}],
+                "member_id": "106742775",
+                "user_query": "What are my claims?",
+            },
+            config=config,
+        )
 
         # Verify execution completed
         assert result.get("is_complete") is True
@@ -445,4 +453,3 @@ class TestSnowflakeJSONEncoder:
         assert parsed["member"]["premium"] == 373.64
         assert parsed["claims"][0]["date"] == "2024-01-08"
         assert parsed["claims"][0]["amount"] == 4619.0
-

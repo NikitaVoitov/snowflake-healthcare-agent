@@ -15,6 +15,10 @@ class QueryRequest(BaseSchema):
     )
     tenant_id: str = Field(default="default", description="Tenant identifier for multi-tenancy")
     user_id: str = Field(default="anonymous", description="User identifier for tracking")
+    thread_id: str | None = Field(
+        None,
+        description="Optional thread ID for conversation continuation. If not provided, a new thread is created.",
+    )
 
     @field_validator("member_id", mode="before")
     @classmethod
@@ -34,4 +38,3 @@ class StreamRequest(QueryRequest):
         default=True,
         description="Include intermediate node outputs in stream",
     )
-

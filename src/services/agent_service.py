@@ -63,13 +63,13 @@ class AgentService:
     async def execute(
         self,
         request: QueryRequest,
-        checkpointer: Any | None = None,  # noqa: ARG002
+        checkpointer: Any | None = None,
     ) -> AgentResponse:
         """Execute agent workflow and return final result.
 
         Args:
             request: Validated query request
-            checkpointer: Optional LangGraph checkpointer (handled at dependency level)
+            checkpointer: Optional LangGraph checkpointer for state retrieval
 
         Returns:
             AgentResponse with output and metadata
@@ -82,20 +82,31 @@ class AgentService:
         if not request.query.strip():
             raise ValueError("Query cannot be empty")
 
-        thread_id = self._build_thread_id(request.tenant_id, request.user_id)
+        # Use provided thread_id for conversation continuation, or create new one
+        thread_id = request.thread_id or self._build_thread_id(request.tenant_id, request.user_id)
         config = {"configurable": {"thread_id": thread_id}}
         initial_state = self._build_initial_state(request)
 
-        logger.info(f"Executing agent workflow: {thread_id}")
+        logger.info(f"Executing agent workflow: {thread_id} (continuation: {request.thread_id is not None})")
 
         # Execute graph (checkpointer is handled at dependency level)
         result = await self.graph.ainvoke(initial_state, config=config)
+
+        # Get the actual checkpoint_id from the checkpointer after execution
+        checkpoint_id = None
+        if checkpointer:
+            try:
+                checkpoint_tuple = await checkpointer.aget_tuple(config)
+                if checkpoint_tuple and checkpoint_tuple.checkpoint:
+                    checkpoint_id = checkpoint_tuple.checkpoint.get("id")
+            except Exception as exc:
+                logger.warning(f"Could not retrieve checkpoint_id: {exc}")
 
         return AgentResponse(
             output=result.get("final_response", ""),
             routing=result.get("plan", "unknown"),
             execution_id=thread_id,
-            checkpoint_id=result.get("thread_checkpoint_id"),
+            checkpoint_id=checkpoint_id,
             error_count=result.get("error_count", 0),
             last_error=result.get("last_error"),
             analyst_results=result.get("analyst_results"),
@@ -163,4 +174,3 @@ class AgentService:
                 node="workflow",
                 data={"message": str(exc)},
             )
-
