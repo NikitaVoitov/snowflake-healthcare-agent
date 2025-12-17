@@ -283,38 +283,49 @@ async def parallel_agent_execution(state: HealthcareAgentState) -> dict:
 
 
 async def async_response_agent(state: HealthcareAgentState) -> dict:
-    """Synthesize final response from agent results.
+    """Synthesize final response using Cortex LLM.
 
-    Combines analyst and search results into a coherent
-    response using Cortex LLM for natural language generation.
+    Uses Cortex COMPLETE to generate contextual responses from
+    analyst and search results.
     """
     analyst_results = state.get("analyst_results", {})
     search_results = state.get("search_results", [])
     query = state.get("user_query", "")
 
-    # Build response (in production, use Cortex COMPLETE for synthesis)
-    response_parts = []
+    # Build context for LLM synthesis
+    context_parts = []
 
     if analyst_results:
         member_id = analyst_results.get("member_id", "Unknown")
+        raw_response = analyst_results.get("raw_response", "")
         coverage = analyst_results.get("coverage", {})
-        response_parts.append(
-            f"Based on your member information ({member_id}), "
-            f"your plan has a ${coverage.get('deductible', 'N/A')} deductible "
-            f"and ${coverage.get('copay_office', 'N/A')} office copay."
-        )
+        claims = analyst_results.get("claims", [])
+
+        context_parts.append(f"Member ID: {member_id}")
+        if raw_response:
+            context_parts.append(f"Member Data: {raw_response}")
+        if coverage:
+            context_parts.append(f"Coverage: {coverage}")
+        if claims:
+            context_parts.append(f"Recent Claims: {claims[:3]}")
 
     if search_results:
-        top_result = search_results[0] if search_results else {}
-        response_parts.append(
-            f"From our knowledge base ({len(search_results)} relevant documents found): "
-            f"{top_result.get('text', 'No content')[:200]}..."
-        )
+        top_results = search_results[:3]
+        search_context = "\n".join([r.get("text", "")[:500] for r in top_results])
+        context_parts.append(f"Knowledge Base Results:\n{search_context}")
 
-    final_response = (
-        " ".join(response_parts)
-        or f"I couldn't find specific information for: {query}"
-    )
+    context = "\n\n".join(context_parts)
+
+    # Use Cortex COMPLETE to generate contextual response
+    if _snowpark_session is not None and context:
+        try:
+            final_response = await _synthesize_with_cortex(query, context)
+            logger.info("Response synthesized with Cortex LLM")
+        except Exception as exc:
+            logger.warning(f"Cortex synthesis failed, using fallback: {exc}")
+            final_response = _fallback_response(query, analyst_results, search_results)
+    else:
+        final_response = _fallback_response(query, analyst_results, search_results)
 
     logger.info("Response synthesis complete")
     return {
@@ -322,6 +333,76 @@ async def async_response_agent(state: HealthcareAgentState) -> dict:
         "is_complete": True,
         "current_step": "response",
     }
+
+
+async def _synthesize_with_cortex(query: str, context: str) -> str:
+    """Use Cortex COMPLETE to synthesize a response."""
+
+    def _call_cortex() -> str:
+        escaped_query = query.replace("'", "''")
+        escaped_context = context.replace("'", "''")[:8000]
+
+        prompt = f"""You are a helpful healthcare contact center assistant.
+Answer the user's question based ONLY on the provided context.
+Be concise and accurate. Extract the specific information requested.
+
+User Question: {escaped_query}
+
+Context:
+{escaped_context}
+
+Answer:"""
+
+        sql = f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            'llama3.1-70b',
+            '{prompt.replace("'", "''")}'
+        ) AS response
+        """
+        result = _snowpark_session.sql(sql).collect()
+        return str(result[0][0]) if result else "I couldn't generate a response."
+
+    return await asyncio.to_thread(_call_cortex)
+
+
+def _fallback_response(query: str, analyst_results: dict, search_results: list) -> str:
+    """Generate fallback response when Cortex LLM is unavailable."""
+    response_parts = []
+
+    if analyst_results:
+        member_id = analyst_results.get("member_id")
+        raw_response = analyst_results.get("raw_response", "")
+
+        if raw_response and "NAME" in raw_response:
+            try:
+                import ast
+                member_data = ast.literal_eval(raw_response)
+                if member_data and isinstance(member_data, list) and len(member_data) > 0:
+                    m = member_data[0]
+                    name = m.get("NAME", "Unknown")
+                    plan = m.get("PLAN_NAME", "N/A")
+                    pcp = m.get("PCP", "N/A")
+                    response_parts.append(f"Member {member_id}: {name}, Plan: {plan}, PCP: {pcp}")
+            except (SyntaxError, ValueError):
+                response_parts.append(f"Member ID: {member_id}")
+        elif member_id:
+            response_parts.append(f"Member ID: {member_id}")
+
+        coverage = analyst_results.get("coverage", {})
+        if coverage:
+            plan_name = coverage.get("PLAN_NAME", coverage.get("plan_name", "N/A"))
+            plan_type = coverage.get("PLAN_TYPE", coverage.get("plan_type", "N/A"))
+            if plan_name != "N/A":
+                response_parts.append(f"Plan: {plan_name} ({plan_type})")
+
+    if search_results:
+        top_result = search_results[0] if search_results else {}
+        response_parts.append(
+            f"From knowledge base ({len(search_results)} results): "
+            f"{top_result.get('text', 'No content')[:300]}..."
+        )
+
+    return " | ".join(response_parts) if response_parts else f"No info found for: {query}"
 
 
 async def error_handler_node(state: HealthcareAgentState) -> dict:

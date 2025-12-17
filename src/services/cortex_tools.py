@@ -35,7 +35,7 @@ class AsyncCortexAnalystTool:
 
             if member_id:
                 # Query the DENORMALIZED table which has ALL member data in one place
-                # Including: MEMBER_ID, NAME, DOB, GENDER, ADDRESS, MEMBER_PHONE, PLAN_ID, PLAN_NAME,
+                # Including: MEMBER_ID, NAME, DOB, GENDER, ADDRESS, MEMBER_PHONE, PLAN_ID, PLAN_NAME
                 # PCP, PCP_PHONE, CLAIM_ID, CLAIM_SERVICE, CLAIM_STATUS, CLAIM_BILL_AMT, etc.
                 member_sql = f"""
                 SELECT DISTINCT
@@ -49,7 +49,7 @@ class AsyncCortexAnalystTool:
                 # Get claims from same denormalized table
                 claims_sql = f"""
                 SELECT DISTINCT
-                    claim_id, claim_service_from_date, claim_service, 
+                    claim_id, claim_service_from_date, claim_service,
                     claim_bill_amt, claim_paid_amt, claim_status
                 FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
                 WHERE member_id = '{member_id}' AND claim_id IS NOT NULL
@@ -70,12 +70,13 @@ class AsyncCortexAnalystTool:
                 logger.debug(f"Executing coverage query: {coverage_sql}")
                 coverage_rows = self.session.sql(coverage_sql).collect()
 
+                def row_to_dict(row):
+                    return dict(zip(row._fields, row, strict=True))
+
                 return {
-                    "member": [dict(zip(r._fields, r)) for r in member_rows] if member_rows else [],
-                    "claims": [dict(zip(r._fields, r)) for r in claims_rows] if claims_rows else [],
-                    "coverage": [dict(zip(r._fields, r)) for r in coverage_rows]
-                    if coverage_rows
-                    else [],
+                    "member": [row_to_dict(r) for r in member_rows] if member_rows else [],
+                    "claims": [row_to_dict(r) for r in claims_rows] if claims_rows else [],
+                    "coverage": [row_to_dict(r) for r in coverage_rows] if coverage_rows else [],
                 }
             else:
                 # Use Cortex COMPLETE for semantic query
