@@ -2,10 +2,23 @@
 
 import json
 import logging
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+
+
+class SnowflakeJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder for Snowflake data types."""
+
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, (date, datetime)):
+            return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
 
 from src.dependencies import AgentServiceDep, CheckpointerDep
 from src.models.requests import QueryRequest, StreamRequest
@@ -66,7 +79,9 @@ async def sf_query_agent(
                 logger.error(f"Row {row_index} failed: {e}")
                 results.append([row_index, {"error": str(e)}])
 
-        return JSONResponse(content={"data": results})
+        # Use custom encoder for Snowflake date/Decimal types
+        json_str = json.dumps({"data": results}, cls=SnowflakeJSONEncoder)
+        return JSONResponse(content=json.loads(json_str))
 
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON: {e}")
