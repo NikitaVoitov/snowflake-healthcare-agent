@@ -3,8 +3,8 @@
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.pregel import Pregel
 
 from src.config import Settings
@@ -35,7 +35,15 @@ class AgentService:
     def _build_thread_id(self, tenant_id: str, user_id: str) -> str:
         """Build scoped thread ID for multi-tenancy and checkpointing.
 
-        Format: tenant:{tenant_id}:user:{user_id}:ts:{timestamp}
+        Creates a unique, time-stamped thread ID for conversation tracking
+        and checkpoint isolation across tenants.
+
+        Args:
+            tenant_id: Tenant identifier for isolation.
+            user_id: User identifier for tracking.
+
+        Returns:
+            Formatted thread ID: tenant:{tenant_id}:user:{user_id}:ts:{timestamp}
         """
         ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
         return f"tenant:{tenant_id}:user:{user_id}:ts:{ts}"
@@ -43,11 +51,14 @@ class AgentService:
     def _build_initial_state(self, request: QueryRequest) -> HealthcareAgentState:
         """Build initial state from request.
 
+        Constructs the initial LangGraph state dictionary from a validated
+        query request, setting defaults for all workflow control fields.
+
         Args:
-            request: Validated query request
+            request: Validated QueryRequest with query, member_id, etc.
 
         Returns:
-            Initial state dictionary for graph execution
+            HealthcareAgentState with user_query, member_id, and default values.
         """
         return HealthcareAgentState(
             user_query=request.query.strip(),
@@ -63,7 +74,7 @@ class AgentService:
     async def execute(
         self,
         request: QueryRequest,
-        checkpointer: Any | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> AgentResponse:
         """Execute agent workflow and return final result.
 
@@ -116,7 +127,7 @@ class AgentService:
     async def stream(
         self,
         request: QueryRequest,
-        checkpointer: Any | None = None,  # noqa: ARG002
+        checkpointer: BaseCheckpointSaver | None = None,  # noqa: ARG002
     ) -> AsyncIterator[StreamEvent]:
         """Stream agent execution events for real-time UI updates.
 

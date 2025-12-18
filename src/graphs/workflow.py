@@ -18,7 +18,15 @@ from langgraph.graph import END, START, StateGraph
 from snowflake.snowpark import Session
 
 from src.config import settings
-from src.graphs.state import HealthcareAgentState
+from src.graphs.state import (
+    AgentOutput,
+    ErrorOutput,
+    EscalationOutput,
+    HealthcareAgentState,
+    ParallelOutput,
+    PlannerOutput,
+    ResponseOutput,
+)
 from src.models.agent_types import (
     AnalystResultModel,
     ErrorDetail,
@@ -29,27 +37,47 @@ from src.services.cortex_tools import AsyncCortexAnalystTool, AsyncCortexSearchT
 
 logger = logging.getLogger(__name__)
 
-# Module-level session holder for dependency injection
+# Module-level Snowpark session - Snowpark sessions are thread-safe and can be shared
 # Set via set_snowpark_session() at app startup
 _snowpark_session: Session | None = None
 
 
+def get_snowpark_session() -> Session | None:
+    """Get the current Snowpark session.
+
+    Returns:
+        Current Snowpark session or None if not initialized.
+    """
+    return _snowpark_session
+
+
 def set_snowpark_session(session: Session) -> None:
-    """Set the Snowpark session for Cortex tools (called at app startup)."""
+    """Set the Snowpark session for Cortex tools (called at app startup).
+
+    Args:
+        session: Initialized Snowpark Session instance.
+    """
     global _snowpark_session  # noqa: PLW0603
     _snowpark_session = session
     logger.info("Snowpark session configured for workflow nodes")
 
+
 # --- Agent Functions ---
 
 
-async def async_planner_agent(state: HealthcareAgentState) -> dict:
+async def async_planner_agent(state: HealthcareAgentState) -> PlannerOutput:
     """Route query to appropriate agent(s) based on intent.
 
     Analyzes query to determine if it needs:
     - analyst: Member-specific data (claims, coverage, demographics)
     - search: Knowledge base lookup (policies, FAQs, transcripts)
     - both: Combined member data + policy context
+
+    Args:
+        state: Current workflow state with user_query and member_id.
+
+    Returns:
+        PlannerOutput with plan routing decision and current_step.
     """
     query = state.get("user_query", "").lower()
     member_id = state.get("member_id")
@@ -73,11 +101,17 @@ async def async_planner_agent(state: HealthcareAgentState) -> dict:
     return {"plan": plan, "current_step": "planner"}
 
 
-async def async_analyst_agent(state: HealthcareAgentState) -> dict:
+async def async_analyst_agent(state: HealthcareAgentState) -> AgentOutput:
     """Execute Cortex Analyst for member queries.
 
     Queries member data from MEMBER_SCHEMA tables using
     real Snowflake Cortex tools when session is available.
+
+    Args:
+        state: Current workflow state with plan, member_id, and user_query.
+
+    Returns:
+        AgentOutput with analyst_results or error information.
     """
     plan = state.get("plan", "")
     if plan not in ["analyst", "both"]:
@@ -88,8 +122,9 @@ async def async_analyst_agent(state: HealthcareAgentState) -> dict:
 
     try:
         # Use real Cortex tools if session is available
-        if _snowpark_session is not None:
-            analyst_tool = AsyncCortexAnalystTool(_snowpark_session)
+        session = get_snowpark_session()
+        if session is not None:
+            analyst_tool = AsyncCortexAnalystTool(session)
             results = await analyst_tool.execute(query, member_id)
             logger.info(f"Analyst executed real query for member: {member_id}")
         else:
@@ -139,11 +174,17 @@ async def async_analyst_agent(state: HealthcareAgentState) -> dict:
         }
 
 
-async def async_search_agent(state: HealthcareAgentState) -> dict:
+async def async_search_agent(state: HealthcareAgentState) -> AgentOutput:
     """Execute Cortex Search for knowledge queries.
 
     Searches across FAQs, policies, and call transcripts
     using real Snowflake Cortex Search when session is available.
+
+    Args:
+        state: Current workflow state with plan and user_query.
+
+    Returns:
+        AgentOutput with search_results or error information.
     """
     plan = state.get("plan", "")
     if plan not in ["search", "both"]:
@@ -153,8 +194,9 @@ async def async_search_agent(state: HealthcareAgentState) -> dict:
 
     try:
         # Use real Cortex Search if session is available
-        if _snowpark_session is not None:
-            search_tool = AsyncCortexSearchTool(_snowpark_session)
+        session = get_snowpark_session()
+        if session is not None:
+            search_tool = AsyncCortexSearchTool(session)
             results = await search_tool.execute(query, limit=5)
             logger.info(f"Search executed real query with {len(results)} results")
         else:
@@ -213,11 +255,17 @@ async def async_search_agent(state: HealthcareAgentState) -> dict:
         }
 
 
-async def parallel_agent_execution(state: HealthcareAgentState) -> dict:
+async def parallel_agent_execution(state: HealthcareAgentState) -> ParallelOutput:
     """Execute Analyst and Search in parallel using asyncio.TaskGroup.
 
     Used when planner routes to "both" - executes both agents
     concurrently and merges results.
+
+    Args:
+        state: Current workflow state with plan set to "both".
+
+    Returns:
+        ParallelOutput with merged analyst_results and search_results.
     """
     if state.get("plan") != "both":
         return {}
@@ -282,11 +330,17 @@ async def parallel_agent_execution(state: HealthcareAgentState) -> dict:
     return merged
 
 
-async def async_response_agent(state: HealthcareAgentState) -> dict:
+async def async_response_agent(state: HealthcareAgentState) -> ResponseOutput:
     """Synthesize final response using Cortex LLM.
 
     Uses Cortex COMPLETE to generate contextual responses from
     analyst and search results.
+
+    Args:
+        state: Current workflow state with analyst_results and/or search_results.
+
+    Returns:
+        ResponseOutput with final_response and is_complete flag.
     """
     analyst_results = state.get("analyst_results", {})
     search_results = state.get("search_results", [])
@@ -317,9 +371,10 @@ async def async_response_agent(state: HealthcareAgentState) -> dict:
     context = "\n\n".join(context_parts)
 
     # Use Cortex COMPLETE to generate contextual response
-    if _snowpark_session is not None and context:
+    session = get_snowpark_session()
+    if session is not None and context:
         try:
-            final_response = await _synthesize_with_cortex(query, context)
+            final_response = await _synthesize_with_cortex(session, query, context)
             logger.info("Response synthesized with Cortex LLM")
         except Exception as exc:
             logger.warning(f"Cortex synthesis failed, using fallback: {exc}")
@@ -335,8 +390,17 @@ async def async_response_agent(state: HealthcareAgentState) -> dict:
     }
 
 
-async def _synthesize_with_cortex(query: str, context: str) -> str:
-    """Use Cortex COMPLETE to synthesize a response."""
+async def _synthesize_with_cortex(session: Session, query: str, context: str) -> str:
+    """Use Cortex COMPLETE to synthesize a response.
+
+    Args:
+        session: Active Snowpark session for Cortex calls.
+        query: User's original query.
+        context: Accumulated context from analyst/search results.
+
+    Returns:
+        Synthesized response from Cortex LLM.
+    """
 
     def _call_cortex() -> str:
         escaped_query = query.replace("'", "''")
@@ -359,7 +423,7 @@ Answer:"""
             '{prompt.replace("'", "''")}'
         ) AS response
         """
-        result = _snowpark_session.sql(sql).collect()
+        result = session.sql(sql).collect()
         return str(result[0][0]) if result else "I couldn't generate a response."
 
     return await asyncio.to_thread(_call_cortex)
@@ -376,6 +440,7 @@ def _fallback_response(query: str, analyst_results: dict, search_results: list) 
         if raw_response and "NAME" in raw_response:
             try:
                 import ast
+
                 member_data = ast.literal_eval(raw_response)
                 if member_data and isinstance(member_data, list) and len(member_data) > 0:
                     m = member_data[0]
@@ -390,10 +455,23 @@ def _fallback_response(query: str, analyst_results: dict, search_results: list) 
 
         coverage = analyst_results.get("coverage", {})
         if coverage:
-            plan_name = coverage.get("PLAN_NAME", coverage.get("plan_name", "N/A"))
-            plan_type = coverage.get("PLAN_TYPE", coverage.get("plan_type", "N/A"))
+            # Handle various field name formats (from different data sources)
+            plan_name = coverage.get(
+                "PLAN_NAME", coverage.get("plan_name", coverage.get("plan", "N/A"))
+            )
+            plan_type = coverage.get("PLAN_TYPE", coverage.get("plan_type", ""))
+            deductible = coverage.get("DEDUCTIBLE", coverage.get("deductible", ""))
+            copay = coverage.get("COPAY_OFFICE", coverage.get("copay_office", ""))
+
             if plan_name != "N/A":
-                response_parts.append(f"Plan: {plan_name} ({plan_type})")
+                plan_info = f"Plan: {plan_name}"
+                if plan_type:
+                    plan_info += f" ({plan_type})"
+                if deductible:
+                    plan_info += f", Deductible: ${deductible}"
+                if copay:
+                    plan_info += f", Office Copay: ${copay}"
+                response_parts.append(plan_info)
 
     if search_results:
         top_result = search_results[0] if search_results else {}
@@ -405,11 +483,17 @@ def _fallback_response(query: str, analyst_results: dict, search_results: list) 
     return " | ".join(response_parts) if response_parts else f"No info found for: {query}"
 
 
-async def error_handler_node(state: HealthcareAgentState) -> dict:
+async def error_handler_node(state: HealthcareAgentState) -> ErrorOutput:
     """Handle errors with retry/escalate logic.
 
     Examines last_error to determine if operation should be
     retried (retriable=True) or escalated to human.
+
+    Args:
+        state: Current workflow state with last_error and error_count.
+
+    Returns:
+        ErrorOutput with has_error cleared for retry or should_escalate set.
     """
     last_error = state.get("last_error", {})
     error_count = state.get("error_count", 0)
@@ -422,8 +506,15 @@ async def error_handler_node(state: HealthcareAgentState) -> dict:
     return {"current_step": "escalate", "should_escalate": True}
 
 
-async def escalation_handler(state: HealthcareAgentState) -> dict:  # noqa: ARG001
-    """Handle escalated errors with graceful degradation."""
+async def escalation_handler(state: HealthcareAgentState) -> EscalationOutput:  # noqa: ARG001
+    """Handle escalated errors with graceful degradation.
+
+    Args:
+        state: Current workflow state (unused, error already captured).
+
+    Returns:
+        EscalationOutput with apology response and escalation flags.
+    """
     return {
         "final_response": (
             "I apologize, but I encountered an error processing your request. "
@@ -543,32 +634,44 @@ def create_healthcare_graph() -> StateGraph:
 
 # Initialize Snowpark session at module load time for langgraph dev
 def _initialize_snowpark_session() -> None:
-    """Initialize Snowpark session from environment variables."""
-    global _snowpark_session  # noqa: PLW0603
-    if _snowpark_session is not None:
+    """Initialize Snowpark session from environment variables.
+
+    Creates a Snowpark session using either:
+    - SPCS OAuth token (if SNOWFLAKE_TOKEN is set)
+    - Key-pair authentication (if snowflake_private_key_path is configured)
+
+    Sets the session via contextvars for thread-safe access.
+    """
+    if get_snowpark_session() is not None:
         return  # Already initialized
-    
+
     try:
-        from src.config import settings
         import os
         from pathlib import Path
-        from cryptography.hazmat.primitives import serialization
+
         from cryptography.hazmat.backends import default_backend
-        
+        from cryptography.hazmat.primitives import serialization
+
+        from src.config import settings
+
+        session: Session | None = None
+
         # Check if running in SPCS (OAuth token available)
         if os.environ.get("SNOWFLAKE_TOKEN"):
             logger.info("Creating Snowpark session with SPCS OAuth token")
-            _snowpark_session = Session.builder.configs({
-                "account": settings.snowflake_account,
-                "token": os.environ.get("SNOWFLAKE_TOKEN"),
-                "authenticator": "oauth",
-                "database": settings.snowflake_database,
-                "schema": settings.snowflake_schema,
-                "warehouse": settings.snowflake_warehouse,
-            }).create()
+            session = Session.builder.configs(
+                {
+                    "account": settings.snowflake_account,
+                    "token": os.environ.get("SNOWFLAKE_TOKEN"),
+                    "authenticator": "oauth",
+                    "database": settings.snowflake_database,
+                    "schema": settings.snowflake_schema,
+                    "warehouse": settings.snowflake_warehouse,
+                }
+            ).create()
         elif settings.snowflake_private_key_path:
             logger.info("Creating Snowpark session with key-pair authentication")
-            
+
             # Load private key from file
             key_path = Path(settings.snowflake_private_key_path).expanduser()
             with open(key_path, "rb") as key_file:
@@ -576,30 +679,35 @@ def _initialize_snowpark_session() -> None:
                 p_key = serialization.load_pem_private_key(
                     key_file.read(),
                     password=passphrase.encode() if passphrase else None,
-                    backend=default_backend()
+                    backend=default_backend(),
                 )
-            
+
             # Serialize to DER format for Snowpark
             pkb = p_key.private_bytes(
                 encoding=serialization.Encoding.DER,
                 format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption()
+                encryption_algorithm=serialization.NoEncryption(),
             )
-            
-            _snowpark_session = Session.builder.configs({
-                "account": settings.snowflake_account,
-                "user": settings.snowflake_user,
-                "private_key": pkb,
-                "database": settings.snowflake_database,
-                "schema": settings.snowflake_schema,
-                "warehouse": settings.snowflake_warehouse,
-                "role": settings.snowflake_role,
-            }).create()
+
+            session = Session.builder.configs(
+                {
+                    "account": settings.snowflake_account,
+                    "user": settings.snowflake_user,
+                    "private_key": pkb,
+                    "database": settings.snowflake_database,
+                    "schema": settings.snowflake_schema,
+                    "warehouse": settings.snowflake_warehouse,
+                    "role": settings.snowflake_role,
+                }
+            ).create()
         else:
             logger.warning("No Snowflake credentials configured - using mock mode")
             return
-        
+
+        # Set session via contextvars
+        set_snowpark_session(session)
         logger.info("Snowpark session initialized successfully")
+
     except Exception as exc:
         logger.warning(f"Failed to initialize Snowpark session: {exc}")
 
@@ -609,4 +717,3 @@ _initialize_snowpark_session()
 
 # Export compiled graph for langgraph.json
 healthcare_graph = create_healthcare_graph().compile()
-

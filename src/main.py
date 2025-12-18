@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from src.config import settings
 from src.dependencies import get_compiled_graph
+from src.middleware.logging import RequestLoggingMiddleware
 from src.models.responses import HealthResponse
 from src.routers import agent_routes
 
@@ -135,10 +136,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# Request logging middleware (must be added before CORS for full coverage)
+app.add_middleware(RequestLoggingMiddleware)
+
+# CORS middleware (uses settings for production configuration)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=[origin.strip() for origin in settings.cors_origins.split(",")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

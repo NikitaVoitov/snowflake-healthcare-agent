@@ -2,9 +2,10 @@
 
 import logging
 from functools import lru_cache
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import Depends
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.pregel import Pregel
 
 from src.config import Settings, settings
@@ -20,17 +21,17 @@ def get_settings() -> Settings:
     """Get cached application settings.
 
     Returns:
-        Singleton Settings instance
+        Singleton Settings instance.
     """
     return settings
 
 
 @lru_cache
-def get_checkpointer() -> Any:
+def get_checkpointer() -> BaseCheckpointSaver:
     """Create and cache checkpointer for the application.
 
     Returns:
-        CustomAsyncSnowflakeSaver for persistent checkpoints, or MemorySaver fallback
+        BaseCheckpointSaver implementation (CustomAsyncSnowflakeSaver or MemorySaver).
     """
     return create_checkpointer()
 
@@ -40,7 +41,7 @@ def get_compiled_graph() -> Pregel:
     """Build and cache the compiled healthcare graph WITH checkpointer.
 
     Returns:
-        Compiled StateGraph (Pregel instance) with checkpointing enabled
+        Compiled StateGraph (Pregel instance) with checkpointing enabled.
     """
     logger.info("Compiling healthcare workflow graph")
     checkpointer = get_checkpointer()
@@ -54,11 +55,11 @@ def get_agent_service(
     """Provide configured agent service.
 
     Args:
-        graph: Compiled workflow graph (Pregel instance)
-        app_settings: Application settings
+        graph: Compiled workflow graph (Pregel instance).
+        app_settings: Application settings.
 
     Returns:
-        Configured AgentService instance
+        Configured AgentService instance.
     """
     return AgentService(graph, app_settings)
 
@@ -67,5 +68,4 @@ def get_agent_service(
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 GraphDep = Annotated[Pregel, Depends(get_compiled_graph)]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
-CheckpointerDep = Annotated[Any, Depends(get_checkpointer)]
-
+CheckpointerDep = Annotated[BaseCheckpointSaver, Depends(get_checkpointer)]
