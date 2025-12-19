@@ -43,10 +43,11 @@ class ErrorDetail:
 class AnalystResultModel(BaseModel):
     """Validated result from Cortex Analyst agent."""
 
-    member_id: str = Field(..., description="Member ID from query")
+    member_id: str | None = Field(None, description="Member ID from query (None for aggregate queries)")
     claims: list = Field(default_factory=list, description="Member's claims data")
     coverage: dict = Field(default_factory=dict, description="Plan coverage details")
     raw_response: str | None = Field(None, description="Raw Cortex Analyst response")
+    aggregate_result: dict | None = Field(None, description="Aggregate query result (counts, totals, etc.)")
 
 
 class SearchResultModel(BaseModel):

@@ -235,6 +235,103 @@ class AsyncCortexAnalystTool:
         result = self.session.sql(sql).collect()
         return {"response": str(result[0][0]) if result else None}
 
+    def _execute_aggregate_query(self, query: str) -> dict[str, Any]:
+        """Execute aggregate query over member database.
+
+        Handles queries like "how many members", "total claims", etc.
+
+        Args:
+            query: Natural language query about database aggregates.
+
+        Returns:
+            Dictionary with aggregate results.
+        """
+        # Ensure warehouse is set
+        self.session.sql(f"USE WAREHOUSE {settings.snowflake_warehouse}").collect()
+
+        query_lower = query.lower()
+
+        # Determine what aggregate to run based on query
+        if "member" in query_lower and any(kw in query_lower for kw in ["how many", "count", "total"]):
+            sql = """
+            SELECT 
+                COUNT(DISTINCT member_id) as total_members,
+                COUNT(DISTINCT plan_id) as total_plans,
+                COUNT(DISTINCT plan_type) as plan_types
+            FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+            """
+            result = self.session.sql(sql).collect()
+            if result:
+                row = result[0]
+                return {
+                    "query_type": "member_count",
+                    "total_members": row[0],
+                    "total_plans": row[1],
+                    "plan_types": row[2],
+                }
+
+        elif "claim" in query_lower and any(kw in query_lower for kw in ["how many", "count", "total"]):
+            sql = """
+            SELECT 
+                COUNT(DISTINCT claim_id) as total_claims,
+                SUM(claim_bill_amt) as total_billed,
+                SUM(claim_paid_amt) as total_paid
+            FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+            WHERE claim_id IS NOT NULL
+            """
+            result = self.session.sql(sql).collect()
+            if result:
+                row = result[0]
+                return {
+                    "query_type": "claims_count",
+                    "total_claims": row[0],
+                    "total_billed": float(row[1]) if row[1] else 0,
+                    "total_paid": float(row[2]) if row[2] else 0,
+                }
+
+        # Default: get general database stats
+        sql = """
+        SELECT 
+            COUNT(DISTINCT member_id) as total_members,
+            COUNT(DISTINCT claim_id) as total_claims,
+            COUNT(DISTINCT plan_id) as total_plans
+        FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+        """
+        result = self.session.sql(sql).collect()
+        if result:
+            row = result[0]
+            return {
+                "query_type": "database_stats",
+                "total_members": row[0],
+                "total_claims": row[1],
+                "total_plans": row[2],
+            }
+
+        return {"query_type": "unknown", "error": "Could not determine aggregate query"}
+
+    def _is_aggregate_query(self, query: str) -> bool:
+        """Check if query is an aggregate query (counts, totals, etc.).
+
+        Args:
+            query: Natural language query.
+
+        Returns:
+            True if query is asking for aggregate data.
+        """
+        query_lower = query.lower()
+        aggregate_keywords = [
+            "how many",
+            "total",
+            "count",
+            "all members",
+            "all claims",
+            "statistics",
+            "summary",
+            "average",
+            "database",
+        ]
+        return any(kw in query_lower for kw in aggregate_keywords)
+
     async def execute(self, query: str, member_id: str | None = None) -> dict[str, Any]:
         """Execute Cortex Analyst query asynchronously.
 
@@ -243,13 +340,14 @@ class AsyncCortexAnalystTool:
             member_id: Optional member ID for filtered queries (validated 9 digits).
 
         Returns:
-            Dictionary with member_id, claims, coverage, and raw_response.
+            Dictionary with member_id, claims, coverage, raw_response, and/or aggregate_result.
 
         Raises:
             Exception: Re-raised from underlying Snowflake query failures.
         """
         try:
             if member_id:
+                # Member-specific query
                 result = await asyncio.to_thread(
                     self._execute_member_queries, member_id
                 )
@@ -258,14 +356,29 @@ class AsyncCortexAnalystTool:
                     "claims": result.get("claims", []),
                     "coverage": result.get("coverage", [{}])[0] if result.get("coverage") else {},
                     "raw_response": str(result.get("member", [])),
+                    "aggregate_result": None,
+                }
+            elif self._is_aggregate_query(query):
+                # Database aggregate query (counts, totals, etc.)
+                aggregate_result = await asyncio.to_thread(
+                    self._execute_aggregate_query, query
+                )
+                return {
+                    "member_id": None,
+                    "claims": [],
+                    "coverage": {},
+                    "raw_response": str(aggregate_result),
+                    "aggregate_result": aggregate_result,
                 }
             else:
+                # General semantic query
                 result = await asyncio.to_thread(self._execute_semantic_query, query)
                 return {
                     "member_id": None,
                     "claims": [],
                     "coverage": {},
                     "raw_response": result.get("response"),
+                    "aggregate_result": None,
                 }
 
         except Exception as exc:

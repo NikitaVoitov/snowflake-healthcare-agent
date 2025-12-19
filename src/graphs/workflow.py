@@ -368,18 +368,44 @@ async def async_response_agent(state: HealthcareAgentState) -> ResponseOutput:
     context_parts = []
 
     if analyst_results:
-        member_id = analyst_results.get("member_id", "Unknown")
+        member_id = analyst_results.get("member_id")
         raw_response = analyst_results.get("raw_response", "")
         coverage = analyst_results.get("coverage", {})
         claims = analyst_results.get("claims", [])
+        aggregate_result = analyst_results.get("aggregate_result")
 
-        context_parts.append(f"Member ID: {member_id}")
-        if raw_response:
-            context_parts.append(f"Member Data: {raw_response}")
-        if coverage:
-            context_parts.append(f"Coverage: {coverage}")
-        if claims:
-            context_parts.append(f"Recent Claims: {claims[:3]}")
+        # Handle aggregate queries (no member_id)
+        if aggregate_result:
+            query_type = aggregate_result.get("query_type", "unknown")
+            if query_type == "member_count":
+                context_parts.append(
+                    f"Database Statistics: Total Members: {aggregate_result.get('total_members')}, "
+                    f"Total Plans: {aggregate_result.get('total_plans')}, "
+                    f"Plan Types: {aggregate_result.get('plan_types')}"
+                )
+            elif query_type == "claims_count":
+                context_parts.append(
+                    f"Claims Statistics: Total Claims: {aggregate_result.get('total_claims')}, "
+                    f"Total Billed: ${aggregate_result.get('total_billed', 0):,.2f}, "
+                    f"Total Paid: ${aggregate_result.get('total_paid', 0):,.2f}"
+                )
+            elif query_type == "database_stats":
+                context_parts.append(
+                    f"Database Overview: {aggregate_result.get('total_members')} members, "
+                    f"{aggregate_result.get('total_claims')} claims, "
+                    f"{aggregate_result.get('total_plans')} plans"
+                )
+            else:
+                context_parts.append(f"Aggregate Data: {aggregate_result}")
+        elif member_id:
+            # Member-specific query
+            context_parts.append(f"Member ID: {member_id}")
+            if raw_response:
+                context_parts.append(f"Member Data: {raw_response}")
+            if coverage:
+                context_parts.append(f"Coverage: {coverage}")
+            if claims:
+                context_parts.append(f"Recent Claims: {claims[:3]}")
 
     if search_results:
         top_results = search_results[:3]
@@ -454,8 +480,32 @@ def _fallback_response(query: str, analyst_results: dict, search_results: list) 
     if analyst_results:
         member_id = analyst_results.get("member_id")
         raw_response = analyst_results.get("raw_response", "")
+        aggregate_result = analyst_results.get("aggregate_result")
 
-        if raw_response and "NAME" in raw_response:
+        # Handle aggregate queries first
+        if aggregate_result:
+            query_type = aggregate_result.get("query_type", "unknown")
+            if query_type == "member_count":
+                response_parts.append(
+                    f"We have {aggregate_result.get('total_members')} members in our database, "
+                    f"with {aggregate_result.get('total_plans')} different plans "
+                    f"across {aggregate_result.get('plan_types')} plan types."
+                )
+            elif query_type == "claims_count":
+                response_parts.append(
+                    f"Our database contains {aggregate_result.get('total_claims')} claims, "
+                    f"with total billed amount of ${aggregate_result.get('total_billed', 0):,.2f} "
+                    f"and total paid amount of ${aggregate_result.get('total_paid', 0):,.2f}."
+                )
+            elif query_type == "database_stats":
+                response_parts.append(
+                    f"Database summary: {aggregate_result.get('total_members')} members, "
+                    f"{aggregate_result.get('total_claims')} claims, "
+                    f"and {aggregate_result.get('total_plans')} plans."
+                )
+            else:
+                response_parts.append(f"Query result: {aggregate_result}")
+        elif raw_response and "NAME" in raw_response:
             try:
                 import ast
 
@@ -467,7 +517,8 @@ def _fallback_response(query: str, analyst_results: dict, search_results: list) 
                     pcp = m.get("PCP", "N/A")
                     response_parts.append(f"Member {member_id}: {name}, Plan: {plan}, PCP: {pcp}")
             except (SyntaxError, ValueError):
-                response_parts.append(f"Member ID: {member_id}")
+                if member_id:
+                    response_parts.append(f"Member ID: {member_id}")
         elif member_id:
             response_parts.append(f"Member ID: {member_id}")
 
