@@ -82,18 +82,36 @@ async def async_planner_agent(state: HealthcareAgentState) -> PlannerOutput:
     query = state.get("user_query", "").lower()
     member_id = state.get("member_id")
 
-    # Keywords indicating member data needs
-    member_keywords = ["claim", "coverage", "balance", "deductible", "copay", "member", "my"]
+    # Keywords indicating member-specific data needs (requires member_id)
+    member_keywords = ["claim", "coverage", "balance", "deductible", "copay", "my"]
+    # Keywords indicating database aggregate queries (no member_id needed)
+    database_keywords = [
+        "how many",
+        "total",
+        "count",
+        "all members",
+        "all claims",
+        "statistics",
+        "summary",
+        "average",
+        "members in",
+        "database",
+    ]
     # Keywords indicating knowledge base needs
     knowledge_keywords = ["policy", "appeal", "procedure", "faq", "how to", "what is", "explain"]
 
+    # Database aggregate queries should go to analyst (no member_id needed)
+    has_database_query = any(kw in query for kw in database_keywords)
+    # Member-specific queries need member_id
     has_member_query = member_id and any(kw in query for kw in member_keywords)
     has_knowledge_query = any(kw in query for kw in knowledge_keywords)
 
     if has_member_query and has_knowledge_query:
         plan = "both"
-    elif has_member_query:
+    elif has_member_query or has_database_query:
         plan = "analyst"
+    elif has_database_query and has_knowledge_query:
+        plan = "both"
     else:
         plan = "search"
 

@@ -3,11 +3,15 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
+-- Current version: v1.0.31 (Dec 2024)
+--
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
 --   2. Probes with httpGet require specific format (removed for simplicity)
---   3. SPCS uses OAuth token auth - no credentials needed in env vars
+--   3. SPCS uses OAuth token auth via /snowflake/session/token - no credentials needed
 --   4. Always use versioned image tags (not :latest) for reliable deploys
+--   5. Container name is healthcare-agent (singular), not healthcare-agents
+--   6. Module-level Snowpark session (not ContextVar) for async propagation
 -- =============================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -20,7 +24,7 @@ USE WAREHOUSE PAYERS_CC_WH;
 -- The image repository should already exist from 05_compute_resources.sql
 SHOW IMAGE REPOSITORIES IN SCHEMA STAGING;
 -- Expected: HEALTHCARE_IMAGES with URL like:
--- <account>.registry.snowflakecomputing.com/healthcare_db/staging/healthcare_images
+-- cisco-splunkincubation.registry.snowflakecomputing.com/healthcare_db/staging/healthcare_images
 
 -- -----------------------------------------------------------------------------
 -- Step 2: Verify External Access Integration exists
@@ -37,26 +41,28 @@ DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
 -- -----------------------------------------------------------------------------
 -- Step 4: Create the SPCS Service
 -- -----------------------------------------------------------------------------
--- WORKING version - tested and deployed successfully
+-- WORKING version - tested and deployed successfully (v1.0.31)
 CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     IN COMPUTE POOL AGENTS_POOL
     EXTERNAL_ACCESS_INTEGRATIONS = (HEALTHCARE_EXTERNAL_ACCESS)
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 300
-    COMMENT = 'Healthcare Multi-Agent FastAPI Service v1.0.1'
+    COMMENT = 'Healthcare Multi-Agent FastAPI Service v1.0.31'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.21
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.31
       env:
-        # Only database config needed - SPCS handles auth via service identity
+        # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
         SNOWFLAKE_WAREHOUSE: PAYERS_CC_WH
         # Agent configuration
         MAX_AGENT_STEPS: "3"
         AGENT_TIMEOUT_SECONDS: "30"
+        # Cortex LLM for response synthesis
+        CORTEX_LLM_MODEL: "llama3.1-70b"
       resources:
         requests:
           memory: 2Gi
@@ -106,43 +112,101 @@ SHOW ENDPOINTS IN SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE;
 GRANT USAGE ON SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE TO ROLE PUBLIC;
 
 -- -----------------------------------------------------------------------------
+-- Step 9: Create Service Function for SQL Invocation
+-- -----------------------------------------------------------------------------
+-- IMPORTANT: Endpoint name must match the actual endpoint defined in spec (query-api)
+-- This allows calling the agent from SQL/Streamlit without direct HTTP access
+DROP FUNCTION IF EXISTS STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR);
+
+CREATE OR REPLACE FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(
+    query VARCHAR,
+    member_id VARCHAR DEFAULT NULL,
+    tenant_id VARCHAR DEFAULT 'default'
+)
+RETURNS VARIANT
+SERVICE = STAGING.HEALTHCARE_AGENTS_SERVICE
+ENDPOINT = 'query-api'
+AS '/agents/query';
+
+-- Grant execute on the function
+GRANT USAGE ON FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR) TO ROLE PUBLIC;
+
+-- -----------------------------------------------------------------------------
 -- Docker Build & Push Commands (run from local terminal)
 -- -----------------------------------------------------------------------------
 /*
-# 1. Build for linux/amd64 (required for SPCS)
-docker buildx build --platform linux/amd64 -t healthcare-agents:v1.0.1 .
+# VERSION: Update this for each deployment
+export VERSION=v1.0.31
+export REGISTRY=cisco-splunkincubation.registry.snowflakecomputing.com
 
-# 2. Login to Snowflake registry
+# 1. Build for linux/amd64 (required for SPCS)
+docker buildx build --platform linux/amd64 -t healthcare-agent:$VERSION .
+
+# 2. Login to Snowflake registry (requires jwt connection profile)
+cd /Users/nvoitov/Documents/Splunk/Snowflake/healthcare
+export $(grep -E '^(SNOWFLAKE_|PRIVATE_KEY)' .env | xargs)
+export PRIVATE_KEY_PASSPHRASE="$SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"
 snow spcs image-registry login -c jwt
 
 # 3. Tag for Snowflake registry
-docker tag healthcare-agents:v1.0.1 \
-  <account>.registry.snowflakecomputing.com/healthcare_db/staging/healthcare_images/healthcare-agents:v1.0.1
+docker tag healthcare-agent:$VERSION \
+  $REGISTRY/healthcare_db/staging/healthcare_images/healthcare-agent:$VERSION
 
 # 4. Push to registry
 docker push \
-  <account>.registry.snowflakecomputing.com/healthcare_db/staging/healthcare_images/healthcare-agents:v1.0.1
+  $REGISTRY/healthcare_db/staging/healthcare_images/healthcare-agent:$VERSION
 */
 
 -- -----------------------------------------------------------------------------
 -- Test Commands (run after service is READY)
 -- -----------------------------------------------------------------------------
 /*
--- Test health endpoint via service function
-SELECT HEALTHCARE_DB.STAGING.HEALTHCARE_AGENTS_SERVICE!QUERY_API('/health', 'GET');
-
--- Test query endpoint
-SELECT HEALTHCARE_DB.STAGING.HEALTHCARE_AGENTS_SERVICE!QUERY_API(
-    '/agents/query',
-    'POST',
-    '{"query": "What are my claims?", "memberId": "ABC1001"}'
+-- Test via service function (recommended)
+SELECT STAGING.HEALTHCARE_AGENT_QUERY(
+    'What are the claims for this member?',
+    '700180341',  -- Valid test member ID
+    'default'
 );
+
+-- Test general question (no member_id)
+SELECT STAGING.HEALTHCARE_AGENT_QUERY(
+    'How do I file an appeal?',
+    NULL,
+    'default'
+);
+
+-- Direct endpoint test (alternative)
+SELECT HEALTHCARE_DB.STAGING.HEALTHCARE_AGENTS_SERVICE!QUERY_API(
+    '/health',
+    'GET'
+);
+*/
+
+-- -----------------------------------------------------------------------------
+-- Valid Test Member IDs (from CALL_CENTER_MEMBER_DENORMALIZED)
+-- -----------------------------------------------------------------------------
+/*
+-- Use these for testing - DO NOT use placeholder IDs like 100000001
+-- 700180341 - Christina Frey, Premium Health Plan, PPO
+-- 149061173 - Test member with claims
+-- 470154690 - Angel Underwood, Standard Health Plan, EPO
+
+-- Verify member exists before testing:
+SELECT DISTINCT member_id, name, plan_name, plan_type 
+FROM MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED 
+WHERE member_id IN ('700180341', '149061173', '470154690');
 */
 
 -- -----------------------------------------------------------------------------
 -- Service Management Commands
 -- -----------------------------------------------------------------------------
 /*
+-- Check service status
+SELECT SYSTEM$GET_SERVICE_STATUS('STAGING.HEALTHCARE_AGENTS_SERVICE');
+
+-- View service logs (for debugging)
+CALL SYSTEM$GET_SERVICE_LOGS('STAGING.HEALTHCARE_AGENTS_SERVICE', 0, 'healthcare-agent');
+
 -- Suspend service (stops billing)
 ALTER SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE SUSPEND;
 
@@ -153,6 +217,8 @@ ALTER SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE RESUME;
 DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
 
 -- Update to new image version (must drop and recreate)
-DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
--- Then run CREATE SERVICE with new image tag
+-- 1. Update VERSION variable in docker commands above
+-- 2. Build and push new image
+-- 3. Drop existing service: DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
+-- 4. Run CREATE SERVICE with new image tag in spec
 */
