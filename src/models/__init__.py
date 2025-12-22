@@ -4,7 +4,6 @@ from src.models.agent_types import (
     AnalystResultModel,
     ErrorDetail,
     ErrorType,
-    RoutingDecision,
     SearchResultModel,
 )
 from src.models.base import BaseSchema
@@ -22,6 +21,5 @@ __all__ = [
     "ErrorDetail",
     "AnalystResultModel",
     "SearchResultModel",
-    "RoutingDecision",
 ]
 

@@ -57,12 +57,3 @@ class SearchResultModel(BaseModel):
     score: float = Field(..., ge=0, le=1, description="Relevance score 0-1")
     source: str = Field(..., description="Document source: faqs | policies | transcripts")
     metadata: dict = Field(default_factory=dict, description="Additional metadata")
-
-
-class RoutingDecision(Enum):
-    """Planner routing decisions."""
-
-    ANALYST = "analyst"
-    SEARCH = "search"
-    BOTH = "both"
-

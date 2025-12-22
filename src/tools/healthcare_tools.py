@@ -197,10 +197,42 @@ def _format_analyst_result(result: dict) -> str:
     if claims:
         parts.append(f"--- Claims ({len(claims)} found) ---")
         for claim in claims[:5]:
-            service = claim.get("CLAIM_SERVICE") or claim.get("service") or "Unknown"
-            amount = claim.get("CLAIM_BILL_AMT") or claim.get("amount") or "N/A"
-            status = claim.get("CLAIM_STATUS") or claim.get("status") or "N/A"
-            parts.append(f"  - {service}: ${amount} ({status})")
+            service = (
+                claim.get("CLAIM_SERVICE") or claim.get("claim_service") or 
+                claim.get("service") or "Unknown"
+            )
+            billed = (
+                claim.get("CLAIM_BILL_AMT") or claim.get("claim_bill_amt") or
+                claim.get("claim_billed_amount") or claim.get("amount")
+            )
+            paid = (
+                claim.get("CLAIM_PAID_AMT") or claim.get("claim_paid_amt") or
+                claim.get("claim_paid_amount")
+            )
+            status = (
+                claim.get("CLAIM_STATUS") or claim.get("claim_status") or 
+                claim.get("status") or "N/A"
+            )
+            provider = (
+                claim.get("CLAIM_PROVIDER") or claim.get("claim_provider") or
+                claim.get("provider")
+            )
+            claim_id = (
+                claim.get("CLAIM_ID") or claim.get("claim_id")
+            )
+            
+            # Build claim line with available info
+            line = f"  - {service}"
+            if claim_id:
+                line = f"  - [{claim_id}] {service}"
+            if billed:
+                line += f": Billed ${billed}"
+            if paid:
+                line += f" / Paid ${paid}"
+            if provider:
+                line += f" ({provider})"
+            line += f" - {status}"
+            parts.append(line)
         if len(claims) > 5:
             parts.append(f"  ... and {len(claims) - 5} more claims")
 

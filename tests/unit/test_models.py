@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.models.agent_types import ErrorDetail, ErrorType, RoutingDecision
+from src.models.agent_types import ErrorDetail, ErrorType
 from src.models.base import BaseSchema
 from src.models.requests import QueryRequest, StreamRequest
 from src.models.responses import AgentResponse, HealthResponse, StreamEvent
@@ -174,14 +174,3 @@ class TestErrorDetail:
             fallback_action=None,
         )
         assert error.to_dict()["error_type"] == "timeout"
-
-
-class TestRoutingDecision:
-    """Tests for RoutingDecision enum."""
-
-    def test_routing_values(self) -> None:
-        """All routing options should exist."""
-        assert RoutingDecision.ANALYST.value == "analyst"
-        assert RoutingDecision.SEARCH.value == "search"
-        assert RoutingDecision.BOTH.value == "both"
-

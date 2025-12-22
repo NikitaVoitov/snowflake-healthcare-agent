@@ -9,7 +9,6 @@ from src.graphs.react_state import (
     FinalAnswerOutput,
     HealthcareAgentState,
     ModelOutput,
-    ToolsOutput,
 )
 
 # Workflow functions are imported lazily to avoid circular import
@@ -20,7 +19,6 @@ __all__ = [
     "HealthcareAgentState",
     "ConversationTurn",
     "ModelOutput",
-    "ToolsOutput",
     "FinalAnswerOutput",
     "ErrorHandlerOutput",
 ]

@@ -15,7 +15,7 @@ import logging
 import uuid
 from typing import Literal
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -205,11 +205,27 @@ async def model_node(state: HealthcareAgentState) -> ModelOutput:
     iteration = state.get("iteration", 0) + 1
     max_iterations = state.get("max_iterations", 5)
 
-    # Check iteration limit
+    # Check iteration limit - synthesize answer from collected data
     if iteration > max_iterations:
         logger.warning(f"Max iterations ({max_iterations}) reached")
+        messages = state.get("messages", [])
+
+        # Extract data from the last ToolMessage (most recent result)
+        tool_data = None
+        for msg in reversed(messages):
+            if isinstance(msg, ToolMessage) and msg.content:
+                tool_data = msg.content
+                break
+
+        if tool_data:
+            # Use the data to synthesize an answer
+            answer = f"Based on my analysis:\n\n{tool_data}"
+            logger.info(f"Synthesized answer from tool data: {len(tool_data)} chars")
+        else:
+            answer = "I've reached my processing limit. Based on what I found, please try a more specific question."
+
         return {
-            "messages": [AIMessage(content="I've reached my processing limit. Based on what I found, please try a more specific question.")],
+            "messages": [AIMessage(content=answer)],
             "iteration": iteration,
         }
 
@@ -455,46 +471,6 @@ def compile_react_graph(checkpointer=None):
     logger.info("ReAct healthcare workflow graph compiled")
 
     return compiled
-
-
-# =============================================================================
-# Initial State Builder
-# =============================================================================
-
-
-def build_initial_state(
-    user_query: str,
-    member_id: str | None = None,
-    tenant_id: str = "default",
-    execution_id: str = "",
-    max_iterations: int = 5,
-) -> HealthcareAgentState:
-    """Build initial state for graph execution.
-
-    Args:
-        user_query: The user's question.
-        member_id: Optional member ID for context.
-        tenant_id: Tenant identifier.
-        execution_id: Unique execution identifier.
-        max_iterations: Maximum ReAct iterations (default: 5).
-
-    Returns:
-        Initial HealthcareAgentState ready for graph.ainvoke().
-    """
-    return HealthcareAgentState(
-        messages=[HumanMessage(content=user_query.strip())],
-        user_query=user_query.strip(),
-        member_id=member_id,
-        tenant_id=tenant_id,
-        conversation_history=[],
-        iteration=0,
-        max_iterations=max_iterations,
-        execution_id=execution_id or f"exec_{uuid.uuid4().hex[:8]}",
-        final_answer=None,
-        error_count=0,
-        last_error=None,
-        has_error=False,
-    )
 
 
 # =============================================================================

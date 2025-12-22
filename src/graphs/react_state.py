@@ -30,9 +30,7 @@ class ConversationTurn(TypedDict):
     tools_used: list[str]  # Tools used in this turn (for context)
 
 
-def _append_turns(
-    existing: list[ConversationTurn], new: list[ConversationTurn]
-) -> list[ConversationTurn]:
+def _append_turns(existing: list[ConversationTurn], new: list[ConversationTurn]) -> list[ConversationTurn]:
     """Reducer to append new conversation turns to existing history.
 
     LangGraph uses this to merge state updates. We keep a sliding window
@@ -109,15 +107,6 @@ class ModelOutput(TypedDict, total=False):
     iteration: int
     has_error: bool
     last_error: dict | None
-
-
-class ToolsOutput(TypedDict, total=False):
-    """Output from ToolNode.
-
-    Returns ToolMessage(s) which get added to messages via reducer.
-    """
-
-    messages: list[AnyMessage]  # ToolMessage(s) to append
 
 
 class FinalAnswerOutput(TypedDict, total=False):

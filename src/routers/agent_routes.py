@@ -9,6 +9,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from src.dependencies import AgentServiceDep, CheckpointerDep
+from src.models.requests import QueryRequest, StreamRequest
+from src.models.responses import AgentResponse
+
 
 class SnowflakeJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder for Snowflake data types."""
@@ -20,9 +24,6 @@ class SnowflakeJSONEncoder(json.JSONEncoder):
             return float(obj)
         return super().default(obj)
 
-from src.dependencies import AgentServiceDep, CheckpointerDep
-from src.models.requests import QueryRequest, StreamRequest
-from src.models.responses import AgentResponse
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,6 @@ async def sf_query_agent(
     This endpoint enables calling the agent via SQL:
         -- New conversation
         SELECT HEALTHCARE_AGENT_QUERY('What is my deductible?', '106742775');
-        
         -- Continue conversation (pass thread_id from previous response)
         SELECT HEALTHCARE_AGENT_QUERY('And what about copay?', '106742775', 'previous-thread-id');
     """

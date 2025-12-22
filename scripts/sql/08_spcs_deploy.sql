@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.40 (Dec 2024) - Structured output for Cortex COMPLETE
+-- Current version: v1.0.47 (Dec 2024) - Enhanced claim formatting with amounts
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
