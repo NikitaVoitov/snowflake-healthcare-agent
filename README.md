@@ -1,6 +1,8 @@
-# Healthcare Contact Center Multi-Agent Lab
+# Healthcare Contact Center ReAct Agent
 
-An AI-powered healthcare contact center assistant built with LangGraph multi-agent orchestration on Snowflake.
+An AI-powered healthcare contact center assistant built with **ReAct (Reasoning + Acting)** pattern using LangGraph on Snowflake.
+
+**Current Version:** v1.0.39 | **Architecture:** ReAct Pattern with Cortex Analyst & Search
 
 ---
 
@@ -18,13 +20,14 @@ Traditional systems require agents to navigate multiple applications, causing de
 
 ### The Solution
 
-This lab builds a **production-ready AI assistant** that combines:
+This lab builds a **production-ready AI assistant** using the **ReAct pattern**:
 
-- **Intelligent routing** via Planner Agent to appropriate data sources
-- **Structured queries** via Cortex Analyst (member, claims, coverage)
-- **Semantic search** via Cortex Search (policies, FAQs, transcripts)
-- **Audio transcription** via AI_TRANSCRIBE for call recordings
-- **Async orchestration** via LangGraph with parallel agent execution
+- **Iterative reasoning** via LLM-powered thought/action/observation loop
+- **Intelligent tool selection** - Cortex Analyst for member data, Cortex Search for knowledge
+- **Semantic model** for NL→SQL via Cortex Analyst REST API
+- **Parallel search** across FAQs, Policies, and Call Transcripts
+- **Conversation memory** persisted via Snowflake checkpointer
+- **Async orchestration** via LangGraph with `asyncio.TaskGroup`
 
 All within Snowflake's secure environment—no external API calls required.
 
@@ -32,91 +35,118 @@ All within Snowflake's secure environment—no external API calls required.
 
 ## Architecture
 
-### System Architecture
+### ReAct Workflow
 
 ```mermaid
-flowchart TB
- subgraph snowsight["Snowsight"]
+flowchart TD
+    subgraph snowsight["Snowsight"]
         StreamlitApp["Native Streamlit App"]
-  end
- subgraph spcs["SPCS Container"]
-        FastAPI["FastAPI Async Endpoint"]
-        Orchestrator["LangGraph Orchestrator"]
-        Planner["Planner Agent"]
-        Analyst["Analyst Agent"]
-        Search["Search Agent"]
-        Response["Response Agent"]
-        ErrorHandler["Error Handler Node"]
-        Checkpointer["SnowflakeSaver"]
-  end
- subgraph cortex["Cortex Services"]
-        CortexAnalyst["Cortex Analyst"]
-        CortexSearch["Cortex Search"]
-        CortexLLM["Cortex LLM"]
-        AITranscribe["AI_TRANSCRIBE"]
-  end
- subgraph db["HEALTHCARE_DB"]
-        MemberSchema["MEMBER_SCHEMA"]
-        KnowledgeSchema["KNOWLEDGE_SCHEMA"]
-        CheckpointSchema["CHECKPOINT_SCHEMA"]
-        AudioStage["AUDIO_STAGE"]
-  end
-    FastAPI --> Orchestrator
-    Orchestrator --> Planner
-    Planner -- analyst --> Analyst
-    Planner -- search --> Search
-    Planner -- both --> Analyst & Search
-    Analyst --> Response & CortexAnalyst
-    Search --> Response & CortexSearch
-    Analyst -- error --> ErrorHandler
-    Search -- error --> ErrorHandler
-    ErrorHandler -- retry --> Analyst
-    ErrorHandler -- escalate --> Response
-    Response --> Checkpointer & CortexLLM
-    StreamlitApp -- async POST --> FastAPI
-    Response -- response --> StreamlitApp
-    Planner --> CortexLLM
-    CortexAnalyst --> MemberSchema
-    CortexSearch --> KnowledgeSchema
-    Checkpointer --> CheckpointSchema
-    AITranscribe -- scheduled task --> KnowledgeSchema
-    AudioStage --> AITranscribe
+        ServiceFunction["HEALTHCARE_AGENT_QUERY Function"]
+    end
+
+    subgraph spcs["SPCS Container - v1.0.39"]
+        FastAPI["FastAPI + uvicorn"]
+        ReactService["ReActAgentService"]
+        
+        subgraph react_graph["LangGraph ReAct Workflow"]
+            Reasoner["reasoner_node<br/>Think: What should I do?"]
+            Router{route_action}
+            AnalystTool["analyst_tool<br/>Query member data"]
+            SearchTool["search_tool<br/>Search knowledge base"]
+            Observation["observation_node<br/>Record result"]
+            FinalAnswer["final_answer_node<br/>Generate response"]
+        end
+        
+        Checkpointer["SnowflakeSaver<br/>Conversation Memory"]
+    end
+
+    subgraph cortex["Cortex Services"]
+        CortexComplete["CORTEX.COMPLETE<br/>llama3.1-70b"]
+        CortexAnalyst["Cortex Analyst API<br/>+ Semantic Model"]
+        CortexSearch["CORTEX.SEARCH_PREVIEW"]
+    end
+
+    subgraph db["HEALTHCARE_DB"]
+        SemanticModel["Semantic Model YAML"]
+        MemberData["CALL_CENTER_MEMBER_DENORMALIZED"]
+        KnowledgeData["FAQs / Policies / Transcripts"]
+    end
+
+    StreamlitApp -->|HTTP POST| ServiceFunction
+    ServiceFunction --> FastAPI
+    FastAPI --> ReactService
+    ReactService --> react_graph
+    
+    Reasoner --> Router
+    Router -->|query_member_data| AnalystTool
+    Router -->|search_knowledge| SearchTool
+    Router -->|FINAL_ANSWER| FinalAnswer
+    
+    AnalystTool --> Observation
+    SearchTool --> Observation
+    Observation -->|loop| Reasoner
+    
+    FinalAnswer --> Checkpointer
+    
+    Reasoner --> CortexComplete
+    AnalystTool --> CortexAnalyst
+    SearchTool --> CortexSearch
+    CortexAnalyst --> SemanticModel
+    CortexAnalyst --> MemberData
+    CortexSearch --> KnowledgeData
 ```
 
-### Data Flow Example
+### ReAct Loop Example
 
 ```
-Contact Center Agent Question:
-"What are the recent claims for member DOB 1985-03-15, and what's our policy on claim appeals?"
+User Query: "What claims does member 786924904 have, and what's the policy on appeals?"
 
-                        ↓
-                   PLANNER
-                   └─ Decides: Use BOTH Analyst (for claims) + Search (for policy)
+┌─────────────────────────────────────────────────────────────────────┐
+│ ITERATION 1                                                          │
+├─────────────────────────────────────────────────────────────────────┤
+│ Thought: User wants claims for a specific member AND policy info.    │
+│          I should query member data first.                           │
+│                                                                      │
+│ Action: query_member_data                                            │
+│ Action Input: {"query": "claims for member 786924904"}               │
+│                                                                      │
+│ Observation: Found 4 claims:                                         │
+│   - Office Visit: $150 (approved)                                    │
+│   - Lab Work: $275 (pending)                                         │
+│   - Specialist: $450 (approved)                                      │
+│   - Emergency: $1,200 (in review)                                    │
+└─────────────────────────────────────────────────────────────────────┘
 
-            ┌─────────────────────────┐
-            ▼                         ▼
-       ANALYST                    SEARCH
-       └─ Cortex Analyst          └─ Cortex Search
-          Query: SELECT claims       Query: "claim appeal policy"
-          FOR member DOB...          RESULT: Policy docs + FAQ chunks
-          RESULT: 3 recent claims    (relevance scores 0.91, 0.87)
+┌─────────────────────────────────────────────────────────────────────┐
+│ ITERATION 2                                                          │
+├─────────────────────────────────────────────────────────────────────┤
+│ Thought: Now I have the claims. User also asked about appeal policy.│
+│          I should search the knowledge base.                         │
+│                                                                      │
+│ Action: search_knowledge                                             │
+│ Action Input: {"query": "claim appeal policy procedure"}             │
+│                                                                      │
+│ Observation: Found in FAQs:                                          │
+│   "Appeals must be filed within 30 days of denial.                   │
+│    Submit Form CA-101 with supporting documentation..."              │
+└─────────────────────────────────────────────────────────────────────┘
 
-            └────────────┬────────────┘
-                         ▼
-                  RESPONSE GENERATION
-                  "Member has 3 claims:
-                   • Hospitalization: $2,500 (approved)
-                   • ER visit: $450 (approved)
-                   • Lab work: $125 (pending)
-                   
-                   Regarding appeals: Our policy allows 30 days
-                   from denial notice. Submit form X to..."
-                   
-                   [Sources: Policy Doc v2.1, FAQ #45]
-
-                         ↓
-                   CONTACT CENTER AGENT
-                   Gets instant answer to help member
+┌─────────────────────────────────────────────────────────────────────┐
+│ ITERATION 3                                                          │
+├─────────────────────────────────────────────────────────────────────┤
+│ Thought: I have both the claims data and appeal policy info.        │
+│          I can now provide a complete answer.                        │
+│                                                                      │
+│ Action: FINAL_ANSWER                                                 │
+│ Answer: "Member 786924904 has 4 claims on file:                      │
+│          • Office Visit ($150) - Approved                            │
+│          • Lab Work ($275) - Pending                                 │
+│          • Specialist ($450) - Approved                              │
+│          • Emergency ($1,200) - In Review                            │
+│                                                                      │
+│          Regarding appeals: You have 30 days from denial to file.    │
+│          Use Form CA-101 with supporting documentation..."           │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Database Schema
@@ -124,17 +154,16 @@ Contact Center Agent Question:
 ```
 HEALTHCARE_DB
 ├── MEMBER_SCHEMA
-│   ├── MEMBERS (member_id, dob, name, plan_id, status, address, phone)
-│   ├── CLAIMS (claim_id, member_id, claim_date, service_type, amount, status)
-│   └── COVERAGE (plan_id, plan_name, deductible, copay_office, copay_er)
+│   ├── MEMBERS (member_id, dob, name, plan_id, status, address, phone) - 242 rows
+│   ├── CLAIMS (claim_id, member_id, claim_date, service_type, amount, status) - 632 rows
+│   ├── COVERAGE (plan_id, plan_name, deductible, copay_office, copay_er)
+│   └── CALL_CENTER_MEMBER_DENORMALIZED (denormalized view for Cortex Analyst) - 632 rows
 │
 ├── KNOWLEDGE_SCHEMA
-│   ├── FAQS (faq_id, question, answer, category, updated_date)
-│   ├── POLICIES (policy_id, policy_name, content, version, effective_date)
-│   ├── CALL_TRANSCRIPTS (transcript_id, member_id, call_date, transcript_text, summary, sentiment)
-│   ├── AUDIO_FILES (audio_id, call_recording_path, member_id, duration, uploaded_date)
-│   ├── CALLER_INTENT_TRAIN_DATASET (training data for caller intent prediction)
-│   └── CALLER_INTENT_PREDICT_DATASET (prediction data)
+│   ├── FAQS (faq_id, question, answer, category) - 4 rows
+│   ├── POLICIES (policy_id, policy_name, content, version)
+│   ├── CALL_TRANSCRIPTS (transcript_id, member_id, transcript_text, summary) - 32 rows
+│   └── AUDIO_FILES (audio_id, call_recording_path, duration)
 │
 ├── CHECKPOINT_SCHEMA (LangGraph State Persistence)
 │   ├── LANGGRAPH_CHECKPOINTS
@@ -143,14 +172,14 @@ HEALTHCARE_DB
 │   └── LANGGRAPH_CHECKPOINT_MIGRATIONS
 │
 ├── STAGING
-│   ├── AUDIO_STAGE_SSE (MP3/WAV files - SSE encrypted for AI_TRANSCRIBE)
-│   └── RAW_DATA_SSE (CSVs, PDFs - SSE encrypted for PARSE_DOCUMENT)
+│   ├── SEMANTIC_MODELS (Cortex Analyst semantic model YAML)
+│   ├── HEALTHCARE_IMAGES (Docker image repository)
+│   └── RAW_DATA (CSVs, PDFs)
 │
-└── Cortex Services
-    ├── FAQS_SEARCH (semantic search on FAQ answer column)
-    ├── POLICIES_SEARCH (semantic search on policy content)
-    ├── TRANSCRIPTS_SEARCH (semantic search on call transcripts)
-    └── MEMBER_SEMANTIC_MODEL (Cortex Analyst for structured queries)
+└── Cortex Search Services
+    ├── FAQS_SEARCH (on answer column)
+    ├── POLICIES_SEARCH (on content column)
+    └── TRANSCRIPTS_SEARCH (on transcript_text column)
 ```
 
 ---
@@ -160,61 +189,52 @@ HEALTHCARE_DB
 ```
 healthcare/
 ├── src/
-│   ├── __init__.py
-│   ├── main.py                          # FastAPI app with lifespan context manager
-│   ├── config.py                        # pydantic-settings BaseSettings
+│   ├── main.py                          # FastAPI app with lifespan
+│   ├── config.py                        # pydantic-settings with SPCS detection
 │   ├── dependencies.py                  # @lru_cache + Depends factories
-│   ├── exceptions.py                    # Custom exceptions + global handler
 │   ├── routers/
-│   │   └── agent_routes.py              # /query, /stream endpoints (RORO pattern)
+│   │   └── agent_routes.py              # /query, /stream, /sf-query endpoints
 │   ├── graphs/
-│   │   ├── state.py                     # TypedDict with reducers + error tracking
-│   │   └── workflow.py                  # StateGraph with asyncio.TaskGroup
+│   │   ├── react_state.py               # HealthcareReActState TypedDict
+│   │   ├── react_workflow.py            # ReAct reasoning loop graph
+│   │   ├── react_prompts.py             # System prompts + tool descriptions
+│   │   └── react_parser.py              # LLM output parsing (orjson + fallbacks)
 │   ├── models/
-│   │   ├── base.py                      # BaseSchema with ConfigDict
-│   │   ├── requests.py                  # QueryRequest, StreamRequest
+│   │   ├── requests.py                  # QueryRequest (member_id validation)
 │   │   ├── responses.py                 # AgentResponse, StreamEvent
-│   │   └── agent_types.py               # AnalystResult, SearchResult, ErrorDetail
-│   ├── services/
-│   │   ├── agent_service.py             # AgentService.execute(), .stream()
-│   │   ├── cortex_tools.py              # AsyncCortexAnalystTool, AsyncCortexSearchTool
-│   │   └── checkpointer.py              # AsyncSnowflakeSaver setup
-│   └── middleware/
-│       └── logging.py                   # Request ID middleware
-│
-├── notebooks/
-│   ├── healthcare_agents.ipynb          # Development notebook
-│   ├── payer_setup.ipynb                # Original data setup
-│   └── data/
-│       ├── DATA_PRODUCT/                # Member/claims CSVs
-│       ├── CALLER_INTENT/               # Caller intent training data
-│       ├── FAQS/                        # Enterprise_NXT FAQ PDFs
-│       └── CALL_RECORDINGS/             # MP3 audio files
-│
-├── tests/
-│   ├── conftest.py                      # Fixtures
-│   ├── unit/                            # Unit tests
-│   └── integration/                     # Integration tests
+│   │   └── agent_types.py               # AnalystResultModel, SearchResultModel
+│   └── services/
+│       ├── react_agent_service.py       # ReActAgentService.execute(), .stream()
+│       ├── cortex_tools.py              # AsyncCortexAnalystTool, AsyncCortexSearchTool
+│       ├── cortex_analyst_client.py     # Async REST client for Cortex Analyst API
+│       └── snowflake_checkpointer.py    # SQLAlchemy-based LangGraph checkpointer
 │
 ├── scripts/
-│   ├── streamlit/                       # Original Streamlit assets
-│   └── sql/
-│       ├── 01_setup_db.sql              # Database, schemas, tables
-│       ├── 02_checkpoint_schema.sql     # LangGraph checkpoint tables
-│       ├── 03_load_data.sql             # CSV/PDF/MP3 data loading
-│       ├── 04_cortex_services.sql       # Cortex Search services
-│       ├── 05_compute_resources.sql     # Compute pool, warehouse
-│       ├── 06_audio_task.sql            # AI_TRANSCRIBE scheduled task
-│       └── 07_deploy_streamlit.sql      # Streamlit deployment
+│   ├── sql/
+│   │   ├── 01_setup_db.sql              # Database, schemas, tables
+│   │   ├── 02_checkpoint_schema.sql     # LangGraph checkpoint tables
+│   │   ├── 03_load_data.sql             # Data loading
+│   │   ├── 04_cortex_services.sql       # Cortex Search services
+│   │   ├── 05_compute_resources.sql     # Compute pool, warehouse
+│   │   ├── 08_spcs_deploy.sql           # SPCS deployment (v1.0.39)
+│   │   ├── 09_semantic_model.sql        # Semantic model stage/upload
+│   │   └── semantic_models/
+│   │       └── healthcare_semantic_model.yaml  # Cortex Analyst NL→SQL model
+│   └── streamlit/
+│       └── payer_assistant.py           # Streamlit chat interface
 │
-├── streamlit/
-│   └── app.py                           # Multi-agent chat interface
+├── tests/                               # 79 tests
+│   ├── conftest.py                      # ReAct-specific fixtures
+│   ├── unit/
+│   │   ├── test_models.py
+│   │   └── test_snowflake_checkpointer.py
+│   └── integration/
+│       ├── test_agent_service.py
+│       └── test_real_snowflake.py
 │
-├── pyproject.toml                       # uv dependency management
-├── uv.lock                              # Locked dependencies
-├── langgraph.json                       # LangGraph CLI config
-├── Dockerfile                           # SPCS container with uv
-├── .env                                 # Environment variables
+├── pyproject.toml                       # Dependencies (Python 3.11-3.13)
+├── langgraph.json                       # LangGraph config (react_healthcare only)
+├── Dockerfile                           # SPCS container (python:3.13-slim)
 └── README.md
 ```
 
@@ -224,14 +244,14 @@ healthcare/
 
 | Feature | Description |
 |---------|-------------|
-| **Intelligent Routing** | Planner Agent decides which agents (Analyst, Search, or both) to invoke based on query intent |
-| **Parallel Execution** | Analyst and Search agents run concurrently via `asyncio.TaskGroup` |
-| **Hybrid Data Access** | Combines structured queries (Cortex Analyst) + semantic search (Cortex Search) |
-| **Audio Processing** | AI_TRANSCRIBE scheduled task processes call recordings with speaker diarization |
-| **Circuit Breaker** | Error handling with retry/escalate logic and max step limits |
-| **State Persistence** | AsyncSnowflakeSaver checkpoints conversation state to Snowflake |
-| **Streaming Responses** | SSE endpoint for real-time agent execution updates |
-| **Multi-tenant** | Thread scoping with `tenant:user:timestamp` format |
+| **ReAct Pattern** | Think → Act → Observe loop with LLM reasoning |
+| **Semantic Model** | NL→SQL via Cortex Analyst REST API with verified queries |
+| **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
+| **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
+| **Source Priority** | Transcripts > Policies > FAQs for relevance ranking |
+| **Lenient Parsing** | orjson + regex fallbacks for robust LLM output handling |
+| **SPCS OAuth** | Automatic authentication via `/snowflake/session/token` |
+| **Streaming** | SSE endpoint for real-time agent execution updates |
 
 ---
 
@@ -241,11 +261,11 @@ healthcare/
 |-------|-----------|---------|
 | **Frontend** | Streamlit | Chat interface with session memory |
 | **API** | FastAPI + uvicorn | Async HTTP endpoints |
-| **Orchestration** | LangGraph | Multi-agent state graph with checkpointing |
-| **Structured Data** | Cortex Analyst | SQL generation via semantic model |
-| **Unstructured Data** | Cortex Search | Semantic search (FAQs, policies, transcripts) |
-| **Audio Processing** | AI_TRANSCRIBE | Call transcription with summarization |
-| **Validation** | Pydantic v2 | Request/response models with strict typing |
+| **Orchestration** | LangGraph | ReAct state graph with checkpointing |
+| **Reasoning** | Cortex COMPLETE | llama3.1-70b for thought generation |
+| **Structured Data** | Cortex Analyst API | NL→SQL via semantic model |
+| **Unstructured Data** | Cortex Search | FAQs, policies, call transcripts |
+| **Validation** | Pydantic v2 | Request/response models |
 | **Deployment** | SPCS | Snowflake Container Services |
 
 ---
@@ -256,8 +276,8 @@ healthcare/
 
 - Snowflake account with Cortex services enabled
 - Python 3.11+ with `uv` package manager
-- Key-pair Snwoflake authentication configured
-- Snow cli is configured
+- Key-pair Snowflake authentication configured
+- Snow CLI configured (`snow sql -c jwt` works)
 
 ### Quick Start
 
@@ -268,24 +288,28 @@ cd /path/to/healthcare
 # Install dependencies
 uv sync --group dev
 
-# Run SQL setup scripts (in order)
+# Run SQL setup scripts
 snow sql -c jwt --filename scripts/sql/01_setup_db.sql
 snow sql -c jwt --filename scripts/sql/02_checkpoint_schema.sql
-# ... (see impl_plan_final.md for data loading steps)
+# ... continue with remaining scripts
 
-# Start LangGraph Studio for local development
-uv run langgraph dev
+# Upload semantic model
+snow sql -c jwt --filename scripts/sql/09_semantic_model.sql
+# PUT file to @STAGING.SEMANTIC_MODELS
 
-# Run tests
-uv run pytest tests/ -v
+# Start LangGraph dev server
+langgraph dev --port 8123
 
-# Start FastAPI server
-uv run uvicorn src.main:app --reload
+# Run tests (79 tests)
+poetry run pytest tests/ -v
+
+# Start FastAPI server locally
+uvicorn src.main:app --reload
 ```
 
 ### Environment Variables
 
-Create `.env` file with:
+Create `.env` file:
 
 ```env
 SNOWFLAKE_ACCOUNT=your_account
@@ -297,6 +321,35 @@ SNOWFLAKE_WAREHOUSE=PAYERS_CC_WH
 SNOWFLAKE_ROLE=ACCOUNTADMIN
 ```
 
+### SPCS Deployment
+
+```bash
+# Build Docker image for linux/amd64
+docker build --platform linux/amd64 -t healthcare-agent:v1.0.39 .
+
+# Tag and push to Snowflake registry
+REGISTRY="your-account.registry.snowflakecomputing.com"
+docker tag healthcare-agent:v1.0.39 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.39
+snow spcs image-registry login -c jwt
+docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.39
+
+# Deploy service
+snow sql -c jwt --filename scripts/sql/08_spcs_deploy.sql
+```
+
+### Test SPCS Service
+
+```sql
+-- Simple query
+SELECT STAGING.HEALTHCARE_AGENT_QUERY('How many members do we have?', NULL, 'test_1');
+
+-- Member-specific query
+SELECT STAGING.HEALTHCARE_AGENT_QUERY('Tell me about member 786924904', '786924904', 'test_2');
+
+-- Knowledge search
+SELECT STAGING.HEALTHCARE_AGENT_QUERY('What is the policy for prescription coverage?', NULL, 'test_3');
+```
+
 ---
 
 ## References
@@ -304,7 +357,6 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 ### Original Lab Resources
 
 - **Snowflake QuickStart Guide**: [AI Agent for Health Payers Contact Center](https://quickstarts.snowflake.com/guide/ai_agent_health_payers_cc/index.html)
-- **Snowflake HCLS Guide**: [AI Agent Health Payers CC](https://www.snowflake.com/en/developers/guides/ai-agent-health-payers-cc/)
 - **Video Walkthrough**: [YouTube - Healthcare AI Agent Demo](https://youtu.be/UXge7Vv8uSg?si=aWw2GcnCfWRMVzUE)
 
 ### Core Technologies
@@ -313,7 +365,6 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 - [Snowflake Cortex Analyst](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst)
 - [Snowflake Cortex Search](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-search)
 - [Snowflake Container Services (SPCS)](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview)
-- [AI_TRANSCRIBE Function](https://docs.snowflake.com/en/sql-reference/functions/ai_transcribe)
 
 ---
 
