@@ -248,8 +248,6 @@ healthcare/
 | **Semantic Model** | NL→SQL via Cortex Analyst REST API with verified queries |
 | **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
-| **Source Priority** | Transcripts > Policies > FAQs for relevance ranking |
-| **Lenient Parsing** | orjson + regex fallbacks for robust LLM output handling |
 | **SPCS OAuth** | Automatic authentication via `/snowflake/session/token` |
 | **Streaming** | SSE endpoint for real-time agent execution updates |
 
