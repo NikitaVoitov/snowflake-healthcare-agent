@@ -14,16 +14,12 @@ class TestReActAgentServiceExecute:
     """Tests for ReActAgentService.execute() method."""
 
     @pytest.fixture
-    def agent_service(
-        self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock
-    ) -> ReActAgentService:
+    def agent_service(self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock) -> ReActAgentService:
         """Create ReActAgentService with mocked dependencies."""
         return ReActAgentService(mock_compiled_graph, mock_settings)
 
     @pytest.mark.asyncio
-    async def test_execute_returns_agent_response(
-        self, agent_service: ReActAgentService, sample_query_request: QueryRequest
-    ) -> None:
+    async def test_execute_returns_agent_response(self, agent_service: ReActAgentService, sample_query_request: QueryRequest) -> None:
         """execute() should return AgentResponse."""
         result = await agent_service.execute(sample_query_request)
         assert isinstance(result, AgentResponse)
@@ -50,9 +46,7 @@ class TestReActAgentServiceExecute:
             QueryRequest(query="   ")
 
     @pytest.mark.asyncio
-    async def test_execute_builds_correct_thread_id(
-        self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock
-    ) -> None:
+    async def test_execute_builds_correct_thread_id(self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock) -> None:
         """execute() should build thread_id from tenant and user."""
         service = ReActAgentService(mock_compiled_graph, mock_settings)
         request = QueryRequest(query="test", tenant_id="acme", user_id="user123")
@@ -68,16 +62,12 @@ class TestReActAgentServiceStream:
     """Tests for ReActAgentService.stream() method."""
 
     @pytest.fixture
-    def agent_service(
-        self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock
-    ) -> ReActAgentService:
+    def agent_service(self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock) -> ReActAgentService:
         """Create ReActAgentService with mocked dependencies."""
         return ReActAgentService(mock_compiled_graph, mock_settings)
 
     @pytest.mark.asyncio
-    async def test_stream_yields_events(
-        self, agent_service: ReActAgentService, sample_query_request: QueryRequest
-    ) -> None:
+    async def test_stream_yields_events(self, agent_service: ReActAgentService, sample_query_request: QueryRequest) -> None:
         """stream() should yield StreamEvent objects."""
         events = []
         async for event in agent_service.stream(sample_query_request):
@@ -86,9 +76,7 @@ class TestReActAgentServiceStream:
         assert events[0].event_type == "node_start"
 
     @pytest.mark.asyncio
-    async def test_stream_emits_completion_event(
-        self, agent_service: ReActAgentService, sample_query_request: QueryRequest
-    ) -> None:
+    async def test_stream_emits_completion_event(self, agent_service: ReActAgentService, sample_query_request: QueryRequest) -> None:
         """stream() should emit completion event at end."""
         events = []
         async for event in agent_service.stream(sample_query_request):
@@ -111,9 +99,7 @@ class TestReActAgentServiceHelpers:
     """Tests for ReActAgentService helper methods."""
 
     @pytest.fixture
-    def agent_service(
-        self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock
-    ) -> ReActAgentService:
+    def agent_service(self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock) -> ReActAgentService:
         """Create ReActAgentService with mocked dependencies."""
         return ReActAgentService(mock_compiled_graph, mock_settings)
 
@@ -124,9 +110,7 @@ class TestReActAgentServiceHelpers:
         assert "user1" in thread_id
         assert len(thread_id) > len("tenant1:user1")
 
-    def test_build_turn_state(
-        self, agent_service: ReActAgentService, sample_query_request: QueryRequest
-    ) -> None:
+    def test_build_turn_state(self, agent_service: ReActAgentService, sample_query_request: QueryRequest) -> None:
         """Turn state should include all required ReAct fields."""
         state = agent_service._build_turn_state(sample_query_request, "test-exec-id")
         assert state["user_query"] == sample_query_request.query
@@ -141,9 +125,7 @@ class TestReActRoutingDetermination:
     """Tests for routing determination based on tools used."""
 
     @pytest.fixture
-    def agent_service(
-        self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock
-    ) -> ReActAgentService:
+    def agent_service(self, mock_compiled_graph: AsyncMock, mock_settings: MagicMock) -> ReActAgentService:
         """Create ReActAgentService with mocked dependencies."""
         return ReActAgentService(mock_compiled_graph, mock_settings)
 

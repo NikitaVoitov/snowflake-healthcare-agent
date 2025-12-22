@@ -3,6 +3,9 @@
 Implements the Reasoning + Acting pattern with iterative tool execution.
 The agent alternates between thinking, acting, and observing until
 it can deliver a final answer.
+
+Uses Snowflake Cortex COMPLETE with structured output for reliable
+Thought/Action/Action Input parsing.
 """
 
 import asyncio
@@ -31,6 +34,59 @@ logger = logging.getLogger(__name__)
 
 # Module-level session for SPCS OAuth token auth
 _snowpark_session = None
+
+# =============================================================================
+# Structured Output Schema for Cortex COMPLETE
+# =============================================================================
+
+# JSON Schema for ReAct response format - ensures LLM returns valid structured data
+REACT_RESPONSE_SCHEMA = {
+    "type": "json",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "thought": {
+                "type": "string",
+                "description": "Your reasoning about what to do next",
+            },
+            "action": {
+                "type": "string",
+                "enum": ["query_member_data", "search_knowledge", "FINAL_ANSWER"],
+                "description": "The tool to use or FINAL_ANSWER to respond",
+            },
+            "action_input": {
+                "type": "object",
+                "description": "Parameters for the action",
+                "properties": {
+                    "query": {"type": "string"},
+                    "member_id": {"type": ["string", "null"]},
+                    "answer": {"type": "string"},
+                },
+            },
+        },
+        "required": ["thought", "action", "action_input"],
+    },
+}
+
+# SQL-formatted schema for AI_COMPLETE structured output
+# Uses Snowflake's JSON schema format with named parameters
+REACT_RESPONSE_FORMAT_SQL = (
+    "{"
+    "'type': 'json', "
+    "'schema': {"
+    "'type': 'object', "
+    "'properties': {"
+    "'thought': {'type': 'string'}, "
+    "'action': {'type': 'string', "
+    "'enum': ['query_member_data', 'search_knowledge', 'FINAL_ANSWER']}, "
+    "'action_input': {'type': 'object', "
+    "'properties': {"
+    "'query': {'type': 'string'}, "
+    "'member_id': {'type': ['string', 'null']}, "
+    "'answer': {'type': 'string'}}}}, "
+    "'required': ['thought', 'action', 'action_input']"
+    "}}"
+)
 
 
 def set_snowpark_session(session) -> None:
@@ -97,7 +153,7 @@ def _synthesize_fallback_answer(state: HealthcareReActState) -> str:
             # Find the closing bracket and skip the prefix
             bracket_end = cleaned.find("]")
             if bracket_end > 0:
-                cleaned = cleaned[bracket_end + 1:].strip()
+                cleaned = cleaned[bracket_end + 1 :].strip()
 
         if cleaned:
             response_parts.append(cleaned)
@@ -118,8 +174,8 @@ def _synthesize_fallback_answer(state: HealthcareReActState) -> str:
 async def reasoner_node(state: HealthcareReActState) -> ReasonerOutput:
     """Reasoning node that decides what action to take next.
 
-    Uses Cortex COMPLETE to analyze the query and scratchpad,
-    then outputs a Thought/Action/Action Input.
+    Uses Cortex COMPLETE with structured output to analyze the query and
+    scratchpad, returning a guaranteed JSON response with Thought/Action/Action Input.
 
     Args:
         state: Current ReAct state with user_query and scratchpad.
@@ -151,14 +207,17 @@ async def reasoner_node(state: HealthcareReActState) -> ReasonerOutput:
     )
 
     try:
-        # Call Cortex COMPLETE for reasoning
+        # Escape single quotes for SQL
         escaped_prompt = prompt.replace("'", "''")
         model = getattr(settings, "cortex_llm_model", "llama3.1-70b")
 
+        # Use AI_COMPLETE with structured output for reliable JSON parsing
+        # Named parameters with => syntax, response_format as separate parameter
         sql = f"""
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            '{model}',
-            '{escaped_prompt}'
+        SELECT AI_COMPLETE(
+            model => '{model}',
+            prompt => '{escaped_prompt}',
+            response_format => {REACT_RESPONSE_FORMAT_SQL}
         ) AS response
         """
 
@@ -171,7 +230,7 @@ async def reasoner_node(state: HealthcareReActState) -> ReasonerOutput:
 
         logger.debug(f"Reasoner LLM response: {response_text[:500]}...")
 
-        # Parse the response
+        # Parse the structured JSON response from Cortex COMPLETE
         parsed = parse_react_response(response_text)
 
         current_step = ReActStep(
@@ -652,13 +711,15 @@ def _initialize_snowpark_session() -> None:
     if settings.is_spcs:
         # SPCS mode - use OAuth token
         import os
+        from pathlib import Path
 
         logger.info("Initializing Snowpark session with SPCS OAuth token")
+        token_path = Path("/snowflake/session/token")
         connection_params = {
             "account": os.environ.get("SNOWFLAKE_ACCOUNT", ""),
             "host": os.environ.get("SNOWFLAKE_HOST", ""),
             "authenticator": "oauth",
-            "token": open("/snowflake/session/token").read(),
+            "token": token_path.read_text(),
             "database": settings.snowflake_database,
             "warehouse": settings.snowflake_warehouse,
         }
@@ -671,9 +732,7 @@ def _initialize_snowpark_session() -> None:
         with open(settings.snowflake_private_key_path, "rb") as key_file:
             private_key = serialization.load_pem_private_key(
                 key_file.read(),
-                password=settings.snowflake_private_key_passphrase.encode()
-                if settings.snowflake_private_key_passphrase
-                else None,
+                password=settings.snowflake_private_key_passphrase.encode() if settings.snowflake_private_key_passphrase else None,
                 backend=default_backend(),
             )
 
@@ -707,4 +766,3 @@ _initialize_snowpark_session()
 # Note: LangGraph API handles persistence automatically, so we compile WITHOUT checkpointer
 # The checkpointer is only added when deployed to SPCS via dependencies.py
 react_healthcare_graph = build_react_graph().compile()
-

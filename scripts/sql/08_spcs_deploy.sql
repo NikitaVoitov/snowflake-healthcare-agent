@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.35 (Dec 2024) - Improved Snowpark fallback for top N queries
+-- Current version: v1.0.40 (Dec 2024) - Structured output for Cortex COMPLETE
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
@@ -49,12 +49,12 @@ CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 300
-    COMMENT = 'Healthcare Multi-Agent FastAPI Service v1.0.35 (Top N queries + Semantic Model)'
+    COMMENT = 'Healthcare Multi-Agent FastAPI Service v1.0.40 (Structured Output)'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.35
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.40
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB

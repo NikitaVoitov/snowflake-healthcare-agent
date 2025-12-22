@@ -80,9 +80,7 @@ class TestRealSnowflakeDataTypes:
 
     def test_date_type_from_snowflake(self, snowpark_session) -> None:
         """DATE columns return datetime.date objects."""
-        result = snowpark_session.sql(
-            "SELECT DOB FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED LIMIT 1"
-        ).collect()
+        result = snowpark_session.sql("SELECT DOB FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED LIMIT 1").collect()
 
         assert len(result) > 0
         dob = result[0]["DOB"]
@@ -90,9 +88,7 @@ class TestRealSnowflakeDataTypes:
 
     def test_decimal_type_from_snowflake(self, snowpark_session) -> None:
         """NUMBER/DECIMAL columns return Decimal objects."""
-        result = snowpark_session.sql(
-            "SELECT PREMIUM FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED LIMIT 1"
-        ).collect()
+        result = snowpark_session.sql("SELECT PREMIUM FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED LIMIT 1").collect()
 
         assert len(result) > 0
         premium = result[0]["PREMIUM"]
@@ -100,9 +96,7 @@ class TestRealSnowflakeDataTypes:
 
     def test_varchar_type_from_snowflake(self, snowpark_session) -> None:
         """VARCHAR columns return str objects."""
-        result = snowpark_session.sql(
-            "SELECT NAME, GENDER FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED LIMIT 1"
-        ).collect()
+        result = snowpark_session.sql("SELECT NAME, GENDER FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED LIMIT 1").collect()
 
         assert len(result) > 0
         assert isinstance(result[0]["NAME"], str)
