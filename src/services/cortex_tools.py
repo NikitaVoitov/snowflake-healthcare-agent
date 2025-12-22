@@ -1,20 +1,41 @@
-"""Async wrappers for Snowflake Cortex services."""
+"""Async wrappers for Snowflake Cortex services.
+
+This module provides async tools for:
+- Cortex Analyst: NL→SQL conversion using semantic models (via REST API)
+- Cortex Search: Semantic search across knowledge base documents
+
+The Cortex Analyst tool uses the Cortex Analyst REST API with a semantic
+model for accurate natural language to SQL conversion. Falls back to
+direct Snowpark SQL queries in local development environments.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from typing import Any
+import os
+import re
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from snowflake.snowpark import Session
 from snowflake.snowpark.row import Row
 
 from src.config import settings
 
+if TYPE_CHECKING:
+    from src.services.cortex_analyst_client import AsyncCortexAnalystClient
+
 logger = logging.getLogger(__name__)
+
+# Check if running in SPCS (where OAuth token is available)
+SPCS_TOKEN_FILE = Path("/snowflake/session/token")
+IS_SPCS = SPCS_TOKEN_FILE.exists() or os.environ.get("SNOWFLAKE_HOST") is not None
 
 
 # =============================================================================
-# Helper Functions (extracted for testability)
+# Helper Functions
 # =============================================================================
 
 
@@ -28,72 +49,6 @@ def _row_to_dict(row: Row) -> dict[str, Any]:
         Dictionary with field names as keys.
     """
     return dict(zip(row._fields, row, strict=True))
-
-
-def _build_member_query(member_id: str) -> str:
-    """Build SQL query for member data.
-
-    SQL Safety: member_id is validated by QueryRequest.validate_member_id()
-    to be exactly 9 numeric digits, preventing SQL injection.
-
-    Args:
-        member_id: Validated 9-digit member ID.
-
-    Returns:
-        SQL query string for member data.
-    """
-    return f"""
-    SELECT DISTINCT
-        member_id, name, dob, gender, address, member_phone,
-        plan_id, plan_name, plan_type, premium,
-        pcp, pcp_phone
-    FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
-    WHERE member_id = '{member_id}'
-    LIMIT 1
-    """
-
-
-def _build_claims_query(member_id: str) -> str:
-    """Build SQL query for member claims.
-
-    SQL Safety: member_id is validated by QueryRequest.validate_member_id()
-    to be exactly 9 numeric digits, preventing SQL injection.
-
-    Args:
-        member_id: Validated 9-digit member ID.
-
-    Returns:
-        SQL query string for claims data.
-    """
-    return f"""
-    SELECT DISTINCT
-        claim_id, claim_service_from_date, claim_service,
-        claim_bill_amt, claim_paid_amt, claim_status
-    FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
-    WHERE member_id = '{member_id}' AND claim_id IS NOT NULL
-    LIMIT 5
-    """
-
-
-def _build_coverage_query(member_id: str) -> str:
-    """Build SQL query for member coverage.
-
-    SQL Safety: member_id is validated by QueryRequest.validate_member_id()
-    to be exactly 9 numeric digits, preventing SQL injection.
-
-    Args:
-        member_id: Validated 9-digit member ID.
-
-    Returns:
-        SQL query string for coverage data.
-    """
-    return f"""
-    SELECT DISTINCT
-        plan_id, plan_name, plan_type, premium
-    FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
-    WHERE member_id = '{member_id}'
-    LIMIT 1
-    """
 
 
 def _get_search_columns(source: str) -> str:
@@ -127,10 +82,7 @@ def _parse_search_result(result_data: str | dict, source: str, limit: int) -> li
     parsed_results: list[dict] = []
 
     try:
-        if isinstance(result_data, str):
-            json_data = json.loads(result_data)
-        else:
-            json_data = result_data
+        json_data = json.loads(result_data) if isinstance(result_data, str) else result_data
 
         search_results = json_data.get("results", [])
         for item in search_results[:limit]:
@@ -150,7 +102,6 @@ def _parse_search_result(result_data: str | dict, source: str, limit: int) -> li
 
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning(f"Failed to parse search result: {e}")
-        # Fallback: truncate raw result
         parsed_results.append({
             "text": str(result_data)[:5000],
             "score": 0.9,
@@ -167,10 +118,13 @@ def _parse_search_result(result_data: str | dict, source: str, limit: int) -> li
 
 
 class AsyncCortexAnalystTool:
-    """Async wrapper for Cortex Analyst queries against member data.
+    """Async wrapper for Cortex Analyst queries using semantic model.
 
-    Provides async interface to query member data from the denormalized
-    CALL_CENTER_MEMBER_DENORMALIZED table using Snowpark.
+    Uses Snowflake Cortex Analyst REST API with a YAML semantic model
+    for accurate natural language to SQL conversion.
+
+    In local development (without OAuth), falls back to direct Snowpark
+    SQL queries against the denormalized member table.
     """
 
     def __init__(self, session: Session) -> None:
@@ -180,31 +134,205 @@ class AsyncCortexAnalystTool:
             session: Active Snowpark Session for Snowflake queries.
         """
         self.session = session
+        self._analyst_client: AsyncCortexAnalystClient | None = None
 
-    def _execute_member_queries(self, member_id: str) -> dict[str, list]:
-        """Execute member-specific queries synchronously.
-
-        Args:
-            member_id: Validated 9-digit member ID.
+    def _get_analyst_client(self) -> AsyncCortexAnalystClient:
+        """Get or create Cortex Analyst client.
 
         Returns:
-            Dictionary with member, claims, and coverage data lists.
+            AsyncCortexAnalystClient instance.
         """
-        # Ensure warehouse is set
+        if self._analyst_client is None:
+            from src.services.cortex_analyst_client import AsyncCortexAnalystClient
+            self._analyst_client = AsyncCortexAnalystClient(
+                session=self.session,
+                database=settings.snowflake_database,
+                schema="STAGING",
+            )
+        return self._analyst_client
+
+    async def execute(self, query: str, member_id: str | None = None) -> dict[str, Any]:
+        """Execute natural language query using Cortex Analyst API.
+
+        Uses Cortex Analyst REST API with semantic model for NL→SQL conversion.
+        Supports both SPCS (OAuth) and local (JWT key-pair) authentication.
+
+        Args:
+            query: Natural language query about healthcare data.
+            member_id: Optional member ID for filtered queries.
+
+        Returns:
+            Dictionary with member_id, claims, coverage, raw_response, etc.
+
+        Raises:
+            Exception: Re-raised from API or SQL execution failures.
+        """
+        try:
+            return await self._execute_via_cortex_analyst_api(query, member_id)
+        except ValueError as exc:
+            # If authentication fails (no token available), fall back to Snowpark
+            if "Cannot retrieve authentication token" in str(exc):
+                logger.warning("Cortex Analyst auth unavailable, using Snowpark fallback")
+                return await self._execute_via_snowpark(query, member_id)
+            raise
+
+    async def _execute_via_cortex_analyst_api(
+        self, query: str, member_id: str | None = None
+    ) -> dict[str, Any]:
+        """Execute query using Cortex Analyst REST API with semantic model.
+
+        Args:
+            query: Natural language query.
+            member_id: Optional member ID for context.
+
+        Returns:
+            Structured query results.
+        """
+        client = self._get_analyst_client()
+
+        # Enhance query with member context if provided
+        enhanced_query = query
+        if member_id:
+            enhanced_query = f"For member ID {member_id}: {query}"
+
+        logger.info(f"Cortex Analyst API query: {enhanced_query[:100]}...")
+
+        # Call Cortex Analyst API
+        response = await client.execute_query(enhanced_query)
+
+        # Build result structure
+        result: dict[str, Any] = {
+            "member_id": member_id,
+            "member_info": {},
+            "claims": [],
+            "coverage": {},
+            "grievance": {},
+            "raw_response": None,
+            "aggregate_result": None,
+            "sql": response.get("sql"),
+            "interpretation": response.get("interpretation"),
+            "suggestions": response.get("suggestions", []),
+            "request_id": response.get("request_id"),
+        }
+
+        # Handle errors or suggestions
+        if response.get("error"):
+            result["error"] = response["error"]
+            logger.warning(f"Cortex Analyst error: {response['error']}")
+            return result
+
+        if response.get("suggestions"):
+            logger.info(f"Cortex Analyst returned suggestions: {response['suggestions']}")
+            return result
+
+        # Process query results
+        rows = response.get("results", [])
+        if rows:
+            result["raw_response"] = str(rows)
+            result_type = self._detect_result_type(query, rows)
+
+            if result_type == "member_info":
+                self._extract_member_info(rows, result, member_id)
+            elif result_type == "claims":
+                result["claims"] = self._format_claims(rows)
+            elif result_type == "aggregate":
+                result["aggregate_result"] = self._format_aggregate(rows)
+            else:
+                result["aggregate_result"] = {"query_type": "general", "data": rows}
+
+        return result
+
+    async def _execute_via_snowpark(
+        self, query: str, member_id: str | None = None
+    ) -> dict[str, Any]:
+        """Execute query using direct Snowpark SQL (local fallback).
+
+        Uses the denormalized member table for comprehensive data access.
+
+        Args:
+            query: Natural language query.
+            member_id: Optional member ID for filtered queries.
+
+        Returns:
+            Structured query results.
+        """
+        result: dict[str, Any] = {
+            "member_id": member_id,
+            "member_info": {},
+            "claims": [],
+            "coverage": {},
+            "grievance": {},
+            "raw_response": None,
+            "aggregate_result": None,
+            "sql": None,
+        }
+
+        try:
+            if member_id:
+                # Member-specific query
+                rows = await asyncio.to_thread(self._query_member_data, member_id)
+                result["raw_response"] = str(rows.get("member", []))
+                result["claims"] = rows.get("claims", [])
+                if rows.get("member"):
+                    member = rows["member"][0] if rows["member"] else {}
+                    result["member_info"] = member
+                if rows.get("coverage"):
+                    result["coverage"] = rows["coverage"][0] if rows["coverage"] else {}
+            else:
+                # Aggregate query
+                agg_result = await asyncio.to_thread(self._query_aggregate, query)
+                result["aggregate_result"] = agg_result
+                result["raw_response"] = str(agg_result)
+
+        except Exception as exc:
+            logger.error(f"Snowpark query error: {exc}", exc_info=True)
+            raise
+
+        return result
+
+    def _query_member_data(self, member_id: str) -> dict[str, list]:
+        """Query member-specific data via Snowpark.
+
+        Args:
+            member_id: Validated member ID (9 digits).
+
+        Returns:
+            Dictionary with member, claims, and coverage data.
+        """
         self.session.sql(f"USE WAREHOUSE {settings.snowflake_warehouse}").collect()
 
-        # Execute queries
-        member_sql = _build_member_query(member_id)
-        claims_sql = _build_claims_query(member_id)
-        coverage_sql = _build_coverage_query(member_id)
+        # Member info query
+        member_sql = f"""
+        SELECT DISTINCT
+            MEMBER_ID, NAME, DOB, GENDER, ADDRESS, MEMBER_PHONE,
+            PLAN_ID, PLAN_NAME, PLAN_TYPE, PREMIUM, PCP, PCP_PHONE
+        FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+        WHERE MEMBER_ID = '{member_id}'
+        LIMIT 1
+        """
 
-        logger.debug("Executing member query: %s", member_sql)
+        # Claims query
+        claims_sql = f"""
+        SELECT DISTINCT
+            CLAIM_ID, CLAIM_SERVICE_FROM_DATE, CLAIM_SERVICE,
+            CLAIM_BILL_AMT, CLAIM_PAID_AMT, CLAIM_STATUS
+        FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+        WHERE MEMBER_ID = '{member_id}' AND CLAIM_ID IS NOT NULL
+        ORDER BY CLAIM_SERVICE_FROM_DATE DESC
+        LIMIT 10
+        """
+
+        # Coverage query
+        coverage_sql = f"""
+        SELECT DISTINCT
+            PLAN_ID, PLAN_NAME, PLAN_TYPE, PREMIUM
+        FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+        WHERE MEMBER_ID = '{member_id}'
+        LIMIT 1
+        """
+
         member_rows = self.session.sql(member_sql).collect()
-
-        logger.debug("Executing claims query: %s", claims_sql)
         claims_rows = self.session.sql(claims_sql).collect()
-
-        logger.debug("Executing coverage query: %s", coverage_sql)
         coverage_rows = self.session.sql(coverage_sql).collect()
 
         return {
@@ -213,51 +341,26 @@ class AsyncCortexAnalystTool:
             "coverage": [_row_to_dict(r) for r in coverage_rows] if coverage_rows else [],
         }
 
-    def _execute_semantic_query(self, query: str) -> dict[str, str | None]:
-        """Execute semantic query using Cortex COMPLETE.
+    def _query_aggregate(self, query: str) -> dict[str, Any]:
+        """Query aggregate data via Snowpark.
 
         Args:
             query: Natural language query.
 
         Returns:
-            Dictionary with response field.
+            Aggregate results dictionary.
         """
-        # Ensure warehouse is set
         self.session.sql(f"USE WAREHOUSE {settings.snowflake_warehouse}").collect()
-
-        escaped_query = query.replace("'", "''")
-        sql = f"""
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            'llama3.1-70b',
-            'Based on healthcare member data, answer: {escaped_query}'
-        ) AS response
-        """
-        result = self.session.sql(sql).collect()
-        return {"response": str(result[0][0]) if result else None}
-
-    def _execute_aggregate_query(self, query: str) -> dict[str, Any]:
-        """Execute aggregate query over member database.
-
-        Handles queries like "how many members", "total claims", etc.
-
-        Args:
-            query: Natural language query about database aggregates.
-
-        Returns:
-            Dictionary with aggregate results.
-        """
-        # Ensure warehouse is set
-        self.session.sql(f"USE WAREHOUSE {settings.snowflake_warehouse}").collect()
-
         query_lower = query.lower()
 
-        # Determine what aggregate to run based on query
-        if "member" in query_lower and any(kw in query_lower for kw in ["how many", "count", "total"]):
+        # Member count
+        count_keywords = ["how many", "count", "total"]
+        if "member" in query_lower and any(kw in query_lower for kw in count_keywords):
             sql = """
-            SELECT 
-                COUNT(DISTINCT member_id) as total_members,
-                COUNT(DISTINCT plan_id) as total_plans,
-                COUNT(DISTINCT plan_type) as plan_types
+            SELECT
+                COUNT(DISTINCT MEMBER_ID) as total_members,
+                COUNT(DISTINCT PLAN_ID) as total_plans,
+                COUNT(DISTINCT PLAN_TYPE) as plan_types
             FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
             """
             result = self.session.sql(sql).collect()
@@ -270,14 +373,67 @@ class AsyncCortexAnalystTool:
                     "plan_types": row[2],
                 }
 
-        elif "claim" in query_lower and any(kw in query_lower for kw in ["how many", "count", "total"]):
-            sql = """
-            SELECT 
-                COUNT(DISTINCT claim_id) as total_claims,
-                SUM(claim_bill_amt) as total_billed,
-                SUM(claim_paid_amt) as total_paid
+        # Top N members by premium (highest/lowest)
+        top_match = re.search(r"top\s+(\d+)", query_lower)
+        if top_match and "premium" in query_lower:
+            limit = int(top_match.group(1))
+            order = "DESC" if "highest" in query_lower or "top" in query_lower else "ASC"
+            sql = f"""
+            SELECT DISTINCT MEMBER_ID, NAME, PREMIUM
             FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
-            WHERE claim_id IS NOT NULL
+            WHERE PREMIUM IS NOT NULL
+            ORDER BY PREMIUM {order}
+            LIMIT {limit}
+            """
+            result = self.session.sql(sql).collect()
+            if result:
+                members = [
+                    {"MEMBER_ID": row[0], "MEMBER_NAME": row[1], "PREMIUM": str(row[2])}
+                    for row in result
+                ]
+                return {"query_type": "general", "data": members}
+
+        # Top N members by claims (highest/most)
+        if top_match and any(kw in query_lower for kw in ["claim", "paid", "billed"]):
+            limit = int(top_match.group(1))
+            sql = f"""
+            SELECT MEMBER_ID, NAME, SUM(CLAIM_PAID_AMT) as TOTAL_PAID
+            FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+            WHERE CLAIM_ID IS NOT NULL
+            GROUP BY MEMBER_ID, NAME
+            ORDER BY TOTAL_PAID DESC
+            LIMIT {limit}
+            """
+            result = self.session.sql(sql).collect()
+            if result:
+                members = [
+                    {"MEMBER_ID": row[0], "MEMBER_NAME": row[1], "TOTAL_PAID": str(row[2])}
+                    for row in result
+                ]
+                return {"query_type": "general", "data": members}
+
+        # Member names list
+        if any(kw in query_lower for kw in ["names", "list members", "member names"]):
+            sql = """
+            SELECT DISTINCT MEMBER_ID, NAME
+            FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+            ORDER BY NAME
+            LIMIT 50
+            """
+            result = self.session.sql(sql).collect()
+            if result:
+                members = [{"member_id": row[0], "name": row[1]} for row in result]
+                return {"query_type": "member_list", "members": members, "count": len(members)}
+
+        # Claims count
+        if "claim" in query_lower and any(kw in query_lower for kw in count_keywords):
+            sql = """
+            SELECT
+                COUNT(DISTINCT CLAIM_ID) as total_claims,
+                SUM(CLAIM_BILL_AMT) as total_billed,
+                SUM(CLAIM_PAID_AMT) as total_paid
+            FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
+            WHERE CLAIM_ID IS NOT NULL
             """
             result = self.session.sql(sql).collect()
             if result:
@@ -289,12 +445,12 @@ class AsyncCortexAnalystTool:
                     "total_paid": float(row[2]) if row[2] else 0,
                 }
 
-        # Default: get general database stats
+        # Default: general database stats
         sql = """
-        SELECT 
-            COUNT(DISTINCT member_id) as total_members,
-            COUNT(DISTINCT claim_id) as total_claims,
-            COUNT(DISTINCT plan_id) as total_plans
+        SELECT
+            COUNT(DISTINCT MEMBER_ID) as total_members,
+            COUNT(DISTINCT CLAIM_ID) as total_claims,
+            COUNT(DISTINCT PLAN_ID) as total_plans
         FROM HEALTHCARE_DB.MEMBER_SCHEMA.CALL_CENTER_MEMBER_DENORMALIZED
         """
         result = self.session.sql(sql).collect()
@@ -307,85 +463,140 @@ class AsyncCortexAnalystTool:
                 "total_plans": row[2],
             }
 
-        return {"query_type": "unknown", "error": "Could not determine aggregate query"}
+        return {"query_type": "unknown", "error": "Could not determine query type"}
 
-    def _is_aggregate_query(self, query: str) -> bool:
-        """Check if query is an aggregate query (counts, totals, etc.).
+    def _detect_result_type(self, query: str, rows: list[dict]) -> str:
+        """Detect result type based on query and columns.
 
         Args:
-            query: Natural language query.
+            query: Original natural language query.
+            rows: Query result rows.
 
         Returns:
-            True if query is asking for aggregate data.
+            Result type: 'member_info', 'claims', 'aggregate', or 'general'.
         """
+        if not rows:
+            return "general"
+
+        columns = {k.upper() for k in rows[0]}
+
+        # Member info detection
+        if {"NAME", "DOB", "ADDRESS"}.intersection(columns) and "CLAIM_ID" not in columns:
+            return "member_info"
+
+        # Claims detection
+        if {"CLAIM_ID", "CLAIM_STATUS"}.intersection(columns):
+            return "claims"
+
+        # Aggregate detection
         query_lower = query.lower()
-        aggregate_keywords = [
-            "how many",
-            "total",
-            "count",
-            "all members",
-            "all claims",
-            "statistics",
-            "summary",
-            "average",
-            "database",
-        ]
-        return any(kw in query_lower for kw in aggregate_keywords)
+        if any(kw in query_lower for kw in ["count", "total", "sum", "avg", "how many"]):
+            return "aggregate"
 
-    async def execute(self, query: str, member_id: str | None = None) -> dict[str, Any]:
-        """Execute Cortex Analyst query asynchronously.
+        return "general"
+
+    def _extract_member_info(self, rows: list[dict], result: dict, member_id: str | None) -> None:
+        """Extract member personal info and coverage from results.
 
         Args:
-            query: Natural language query about member data.
-            member_id: Optional member ID for filtered queries (validated 9 digits).
+            rows: Query result rows.
+            result: Result dictionary to update.
+            member_id: Optional member ID override.
+        """
+        if not rows:
+            return
+
+        first_row = rows[0]
+        result["member_id"] = first_row.get("MEMBER_ID", first_row.get("member_id", member_id))
+
+        # Extract personal information - check both UPPER and lower case keys
+        # Helper to get value with fallbacks
+        def get_val(*keys: str, default: Any = None) -> Any:
+            for k in keys:
+                if first_row.get(k) is not None:
+                    return first_row[k]
+            return default
+
+        result["member_info"] = {
+            "NAME": get_val("NAME", "name", "member_name"),
+            "DOB": str(get_val("DOB", "dob", "date_of_birth", default="")),
+            "GENDER": get_val("GENDER", "gender"),
+            "ADDRESS": get_val("ADDRESS", "address"),
+            "PHONE": get_val("MEMBER_PHONE", "member_phone", "phone"),
+            "SMOKER": get_val("SMOKER_IND", "smoker_indicator"),
+            "LIFESTYLE": get_val("LIFESTYLE_INFO", "lifestyle_info"),
+            "CHRONIC_CONDITION": get_val("CHRONIC_CONDITION", "chronic_condition"),
+            "PCP": get_val("PCP", "pcp"),
+            "PCP_PHONE": get_val("PCP_PHONE", "pcp_phone"),
+        }
+
+        # Extract coverage/plan information
+        result["coverage"] = {
+            "PLAN_ID": get_val("PLAN_ID", "plan_id"),
+            "PLAN_NAME": get_val("PLAN_NAME", "plan_name"),
+            "PLAN_TYPE": get_val("PLAN_TYPE", "plan_type"),
+            "PREMIUM": get_val("PREMIUM", "premium"),
+            "CVG_START_DATE": str(get_val("CVG_START_DATE", "cvg_start_date", default="")),
+            "CVG_END_DATE": str(get_val("CVG_END_DATE", "cvg_end_date", default="")),
+            "DEDUCTIBLE": get_val("DEDUCTIBLE", "deductible"),
+            "COPAY_OFFICE": get_val("COPAY_OFFICE", "copay_office"),
+            "COPAY_ER": get_val("COPAY_ER", "copay_er"),
+        }
+
+        # Extract grievance information if present
+        grievance_id = get_val("GRIEVANCE_ID", "grievance_id")
+        if grievance_id:
+            grv_date = str(get_val("GRIEVANCE_DATE", "grievance_date", default=""))
+            result["grievance"] = {
+                "GRIEVANCE_ID": grievance_id,
+                "GRIEVANCE_TYPE": get_val("GRIEVANCE_TYPE", "grievance_type"),
+                "GRIEVANCE_STATUS": get_val("GRIEVANCE_STATUS", "grievance_status"),
+                "GRIEVANCE_DATE": grv_date,
+            }
+
+    def _format_claims(self, rows: list[dict]) -> list[dict]:
+        """Format claims results.
+
+        Args:
+            rows: Query result rows containing claims.
 
         Returns:
-            Dictionary with member_id, claims, coverage, raw_response, and/or aggregate_result.
-
-        Raises:
-            Exception: Re-raised from underlying Snowflake query failures.
+            List of formatted claim dictionaries.
         """
-        try:
-            if member_id:
-                # Member-specific query
-                result = await asyncio.to_thread(
-                    self._execute_member_queries, member_id
-                )
-                return {
-                    "member_id": member_id,
-                    "claims": result.get("claims", []),
-                    "coverage": result.get("coverage", [{}])[0] if result.get("coverage") else {},
-                    "raw_response": str(result.get("member", [])),
-                    "aggregate_result": None,
-                }
-            elif self._is_aggregate_query(query):
-                # Database aggregate query (counts, totals, etc.)
-                aggregate_result = await asyncio.to_thread(
-                    self._execute_aggregate_query, query
-                )
-                return {
-                    "member_id": None,
-                    "claims": [],
-                    "coverage": {},
-                    "raw_response": str(aggregate_result),
-                    "aggregate_result": aggregate_result,
-                }
-            else:
-                # General semantic query
-                result = await asyncio.to_thread(self._execute_semantic_query, query)
-                return {
-                    "member_id": None,
-                    "claims": [],
-                    "coverage": {},
-                    "raw_response": result.get("response"),
-                    "aggregate_result": None,
-                }
+        claims = []
+        for row in rows:
+            service = row.get("CLAIM_SERVICE") or row.get("service_type") or row.get("SERVICE_TYPE")
+            bill_amt = row.get("AMOUNT") or row.get("amount") or row.get("CLAIM_BILL_AMT")
+            status = row.get("STATUS") or row.get("status") or row.get("CLAIM_STATUS")
+            claims.append({
+                "CLAIM_ID": row.get("CLAIM_ID", row.get("claim_id")),
+                "CLAIM_SERVICE": service,
+                "CLAIM_SERVICE_FROM_DATE": str(row.get("CLAIM_DATE", row.get("claim_date", ""))),
+                "CLAIM_BILL_AMT": bill_amt,
+                "CLAIM_STATUS": status,
+            })
+        return claims
 
-        except Exception as exc:
-            logger.error("Cortex Analyst error: %s", exc)
-            logger.error("Query was for member_id: %s", member_id)
-            logger.error("Database context: %s", settings.snowflake_database)
-            raise
+    def _format_aggregate(self, rows: list[dict]) -> dict:
+        """Format aggregate query results.
+
+        Args:
+            rows: Query result rows.
+
+        Returns:
+            Formatted aggregate result dictionary.
+        """
+        if not rows:
+            return {"query_type": "aggregate", "data": None}
+
+        if len(rows) == 1:
+            return {"query_type": "aggregate", **rows[0]}
+
+        return {
+            "query_type": "aggregate_grouped",
+            "data": rows,
+            "row_count": len(rows),
+        }
 
 
 # =============================================================================
@@ -419,7 +630,6 @@ class AsyncCortexSearchTool:
         Returns:
             List of parsed search results.
         """
-        # Ensure warehouse is set
         self.session.sql(f"USE WAREHOUSE {settings.snowflake_warehouse}").collect()
 
         escaped_query = query.replace("'", "''").replace('"', '\\"')
@@ -433,6 +643,7 @@ class AsyncCortexSearchTool:
         """
 
         try:
+            logger.info("Searching %s for: %s", source, query[:50])
             rows = self.session.sql(sql).collect()
         except Exception as exc:
             logger.warning("Search source %s failed: %s", source, exc)
@@ -444,6 +655,7 @@ class AsyncCortexSearchTool:
             result_data = row_dict.get("RESULTS", "{}")
             parsed_results.extend(_parse_search_result(result_data, source, limit))
 
+        logger.info("Search %s returned %d results", source, len(parsed_results))
         return parsed_results
 
     async def _search_source_async(self, source: str, query: str, limit: int) -> list[dict]:
@@ -478,7 +690,6 @@ class AsyncCortexSearchTool:
             List of search results with text, score, source, metadata.
         """
         sources = sources or ["FAQS_SEARCH", "POLICIES_SEARCH", "TRANSCRIPTS_SEARCH"]
-
         all_results: list[dict] = []
 
         try:

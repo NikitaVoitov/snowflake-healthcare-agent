@@ -29,12 +29,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     Shutdown: Cleanup resources
     """
     # Startup
-    logger.info("Starting Healthcare Multi-Agent Service")
+    logger.info("Starting Healthcare Multi-Agent Service (ReAct Workflow)")
     logger.info(f"Snowflake account: {settings.snowflake_account}")
     logger.info(f"Database: {settings.snowflake_database}")
 
     # Initialize Snowpark session for Cortex tools
-    from src.graphs.workflow import set_snowpark_session
+    from src.graphs.react_workflow import set_snowpark_session
 
     try:
         snowpark_session = _create_snowpark_session()
@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     # Pre-compile graph to warm cache
     _ = get_compiled_graph()
-    logger.info("Graph compiled and cached")
+    logger.info("ReAct graph compiled and cached")
 
     yield
 
@@ -128,11 +128,11 @@ def _create_snowpark_session():
 app = FastAPI(
     title="Healthcare Multi-Agent API",
     description=(
-        "Async LangGraph multi-agent system for healthcare contact center. "
-        "Provides intelligent routing to Cortex Analyst (member data) and "
-        "Cortex Search (knowledge base) with parallel execution support."
+        "Async LangGraph ReAct multi-agent system for healthcare contact center. "
+        "Uses intelligent reasoning loop with Cortex Analyst (member data) and "
+        "Cortex Search (knowledge base) for comprehensive query handling."
     ),
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -164,7 +164,7 @@ async def global_exception_handler(request: Request, exc: Exception):  # noqa: A
 @app.get("/health", response_model=HealthResponse, tags=["health"])
 async def health() -> HealthResponse:
     """Health check endpoint for container orchestration."""
-    return HealthResponse(status="healthy", version="0.1.0")
+    return HealthResponse(status="healthy", version="0.2.0")
 
 
 # Include routers
@@ -175,4 +175,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

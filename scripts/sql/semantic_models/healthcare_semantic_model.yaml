@@ -1,0 +1,707 @@
+# Healthcare Semantic Model for Cortex Analyst
+# Based on actual HEALTHCARE_DB schema verified via Snowflake MCP
+# Uses denormalized table as primary source for comprehensive member queries
+
+name: healthcare_semantic_model
+description: |
+  Semantic model for healthcare member data including demographics, 
+  coverage, claims, and grievances. Uses the denormalized call center 
+  view for comprehensive member information.
+
+tables:
+  # Primary table: Denormalized member data with all related information
+  - name: members
+    description: |
+      Comprehensive member information including demographics, plan coverage, 
+      claims, and grievances. This denormalized view provides all data needed 
+      for contact center inquiries in a single table.
+    base_table:
+      database: HEALTHCARE_DB
+      schema: MEMBER_SCHEMA
+      table: CALL_CENTER_MEMBER_DENORMALIZED
+
+    # Member demographics
+    dimensions:
+      - name: member_id
+        description: Unique identifier for the healthcare member
+        expr: MEMBER_ID
+        data_type: VARCHAR
+        unique: true
+        synonyms:
+          - member number
+          - member ID
+          - patient ID
+
+      - name: member_name
+        description: Full name of the member
+        expr: NAME
+        data_type: VARCHAR
+        synonyms:
+          - name
+          - full name
+          - patient name
+
+      - name: date_of_birth
+        description: Member's date of birth
+        expr: DOB
+        data_type: DATE
+        synonyms:
+          - dob
+          - birth date
+          - birthday
+
+      - name: gender
+        description: Member's gender
+        expr: GENDER
+        data_type: VARCHAR
+        sample_values:
+          - Male
+          - Female
+
+      - name: address
+        description: Member's full mailing address
+        expr: ADDRESS
+        data_type: VARCHAR
+        synonyms:
+          - mailing address
+          - residence
+          - location
+
+      - name: member_phone
+        description: Member's contact phone number
+        expr: MEMBER_PHONE
+        data_type: VARCHAR
+        synonyms:
+          - phone
+          - phone number
+          - contact number
+
+      - name: smoker_indicator
+        description: Whether the member is a smoker
+        expr: SMOKER_IND
+        data_type: BOOLEAN
+        synonyms:
+          - smoker
+          - tobacco user
+
+      - name: lifestyle_info
+        description: Member's lifestyle information
+        expr: LIFESTYLE_INFO
+        data_type: VARCHAR
+        synonyms:
+          - lifestyle
+
+      - name: chronic_condition
+        description: Any chronic conditions the member has
+        expr: CHRONIC_CONDITION
+        data_type: VARCHAR
+        synonyms:
+          - chronic illness
+          - medical condition
+          - health condition
+
+      # Plan/Coverage dimensions
+      - name: plan_id
+        description: Unique identifier for the insurance plan
+        expr: PLAN_ID
+        data_type: VARCHAR
+        synonyms:
+          - policy ID
+          - plan number
+
+      - name: plan_name
+        description: Name of the insurance plan
+        expr: PLAN_NAME
+        data_type: VARCHAR
+        synonyms:
+          - policy name
+          - plan
+          - insurance plan
+
+      - name: plan_type
+        description: Type of insurance plan (PPO, HMO, EPO, etc.)
+        expr: PLAN_TYPE
+        data_type: VARCHAR
+        sample_values:
+          - PPO
+          - HMO
+          - EPO
+        synonyms:
+          - policy type
+          - coverage type
+
+      - name: pcp
+        description: Primary Care Physician name
+        expr: PCP
+        data_type: VARCHAR
+        synonyms:
+          - primary care physician
+          - primary doctor
+          - doctor
+
+      - name: pcp_phone
+        description: Primary Care Physician phone number
+        expr: PCP_PHONE
+        data_type: VARCHAR
+        synonyms:
+          - doctor phone
+          - physician phone
+
+      # Claim dimensions
+      - name: claim_id
+        description: Unique identifier for a claim
+        expr: CLAIM_ID
+        data_type: VARCHAR
+        synonyms:
+          - claim number
+
+      - name: claim_service
+        description: Type of service for the claim
+        expr: CLAIM_SERVICE
+        data_type: VARCHAR
+        synonyms:
+          - service type
+          - procedure
+          - treatment
+
+      - name: claim_provider
+        description: Provider who rendered the service
+        expr: CLAIM_PROVIDER
+        data_type: VARCHAR
+        synonyms:
+          - provider
+          - hospital
+          - clinic
+
+      - name: claim_status
+        description: Current status of the claim
+        expr: CLAIM_STATUS
+        data_type: VARCHAR
+        sample_values:
+          - PENDED
+          - PAID
+          - DENIED
+        synonyms:
+          - status
+
+      # Grievance dimensions
+      - name: grievance_id
+        description: Unique identifier for a grievance
+        expr: GRIEVANCE_ID
+        data_type: VARCHAR
+
+      - name: grievance_type
+        description: Type of grievance filed
+        expr: GRIEVANCE_TYPE
+        data_type: VARCHAR
+        synonyms:
+          - complaint type
+
+      - name: grievance_status
+        description: Current status of the grievance
+        expr: GRIEVANCE_STATUS
+        data_type: VARCHAR
+        sample_values:
+          - Open
+          - Resolved
+          - Pending
+
+    # Time-based dimensions
+    time_dimensions:
+      - name: coverage_start_date
+        description: Date when coverage began
+        expr: CVG_START_DATE
+        data_type: DATE
+        synonyms:
+          - start date
+          - effective date
+
+      - name: coverage_end_date
+        description: Date when coverage ends
+        expr: CVG_END_DATE
+        data_type: DATE
+        synonyms:
+          - end date
+          - termination date
+
+      - name: claim_service_from_date
+        description: Date the claim service started
+        expr: CLAIM_SERVICE_FROM_DATE
+        data_type: DATE
+        synonyms:
+          - service date
+          - claim date
+
+      - name: claim_service_to_date
+        description: Date the claim service ended
+        expr: CLAIM_SERVICE_TO_DATE
+        data_type: DATE
+
+      - name: claim_submission_date
+        description: Date the claim was submitted
+        expr: CLAIM_SUBMISSION_DATE
+        data_type: DATE
+
+      - name: claim_paid_date
+        description: Date the claim was paid
+        expr: CLAIM_PAID_DATE
+        data_type: DATE
+        synonyms:
+          - payment date
+
+      - name: grievance_date
+        description: Date the grievance was filed
+        expr: GRIEVANCE_DATE
+        data_type: DATE
+
+      - name: grievance_resolution_date
+        description: Date the grievance was resolved
+        expr: GRIEVANCE_RESOLUTION_DATE
+        data_type: DATE
+
+    # Numeric facts (measures that can be aggregated)
+    facts:
+      - name: premium
+        description: Monthly premium amount for the plan
+        expr: PREMIUM
+        data_type: NUMBER
+        synonyms:
+          - monthly premium
+          - premium amount
+
+      - name: claim_billed_amount
+        description: Amount billed for the claim
+        expr: CLAIM_BILL_AMT
+        data_type: NUMBER
+        synonyms:
+          - billed amount
+          - bill amount
+          - charge
+
+      - name: claim_allowed_amount
+        description: Amount allowed by the plan for the claim
+        expr: CLAIM_ALLOW_AMT
+        data_type: NUMBER
+        synonyms:
+          - allowed amount
+
+      - name: claim_copay_amount
+        description: Copay amount for the claim
+        expr: CLAIM_COPAY_AMT
+        data_type: NUMBER
+        synonyms:
+          - copay
+
+      - name: claim_coinsurance_amount
+        description: Coinsurance amount for the claim
+        expr: CLAIM_COINSURANCE_AMT
+        data_type: NUMBER
+        synonyms:
+          - coinsurance
+
+      - name: claim_deductible_amount
+        description: Deductible amount applied to the claim
+        expr: CLAIM_DEDUCTIBLE_AMT
+        data_type: NUMBER
+        synonyms:
+          - deductible
+
+      - name: claim_paid_amount
+        description: Amount paid by the plan for the claim
+        expr: CLAIM_PAID_AMT
+        data_type: NUMBER
+        synonyms:
+          - paid amount
+          - payment
+
+    # Pre-defined metrics (aggregations)
+    metrics:
+      - name: total_members
+        description: Total count of unique members
+        expr: COUNT(DISTINCT MEMBER_ID)
+        synonyms:
+          - member count
+          - number of members
+
+      - name: total_claims
+        description: Total count of claims
+        expr: COUNT(DISTINCT CLAIM_ID)
+        synonyms:
+          - claim count
+          - number of claims
+
+      - name: total_billed
+        description: Total amount billed across all claims
+        expr: SUM(CLAIM_BILL_AMT)
+        synonyms:
+          - total charges
+
+      - name: total_paid
+        description: Total amount paid across all claims
+        expr: SUM(CLAIM_PAID_AMT)
+        synonyms:
+          - total payments
+
+      - name: average_claim_amount
+        description: Average claim billed amount
+        expr: AVG(CLAIM_BILL_AMT)
+        synonyms:
+          - avg claim
+
+      - name: total_grievances
+        description: Total count of grievances
+        expr: COUNT(DISTINCT GRIEVANCE_ID)
+        synonyms:
+          - grievance count
+
+  # =========================================================================
+  # Knowledge Base: FAQs Table
+  # =========================================================================
+  - name: faqs
+    description: |
+      Frequently asked questions and answers for healthcare members and employers.
+      Contains categorized Q&A content for common inquiries.
+    base_table:
+      database: HEALTHCARE_DB
+      schema: KNOWLEDGE_SCHEMA
+      table: FAQS
+
+    dimensions:
+      - name: faq_id
+        description: Unique identifier for the FAQ entry
+        expr: FAQ_ID
+        data_type: VARCHAR
+        unique: true
+
+      - name: question
+        description: The FAQ question or topic title
+        expr: QUESTION
+        data_type: VARCHAR
+        synonyms:
+          - topic
+          - title
+
+      - name: answer
+        description: The detailed answer to the FAQ question
+        expr: ANSWER
+        data_type: VARCHAR
+        synonyms:
+          - response
+          - content
+
+      - name: category
+        description: Category of the FAQ (e.g., Enterprise_NXT, Member, Employer)
+        expr: CATEGORY
+        data_type: VARCHAR
+        synonyms:
+          - faq category
+          - type
+
+    time_dimensions:
+      - name: faq_updated_date
+        description: Date the FAQ was last updated
+        expr: UPDATED_DATE
+        data_type: DATE
+
+      - name: faq_created_at
+        description: Timestamp when the FAQ was created
+        expr: CREATED_AT
+        data_type: TIMESTAMP
+
+    metrics:
+      - name: total_faqs
+        description: Total number of FAQ entries
+        expr: COUNT(DISTINCT FAQ_ID)
+        synonyms:
+          - faq count
+          - number of faqs
+
+  # =========================================================================
+  # Knowledge Base: Policies Table
+  # =========================================================================
+  - name: policies
+    description: |
+      Healthcare policy documents and guidelines. Contains versioned policy
+      content with effective dates for compliance and reference.
+    base_table:
+      database: HEALTHCARE_DB
+      schema: KNOWLEDGE_SCHEMA
+      table: POLICIES
+
+    dimensions:
+      - name: policy_id
+        description: Unique identifier for the policy
+        expr: POLICY_ID
+        data_type: VARCHAR
+        unique: true
+
+      - name: policy_name
+        description: Name of the policy document
+        expr: POLICY_NAME
+        data_type: VARCHAR
+        synonyms:
+          - policy title
+          - document name
+
+      - name: policy_content
+        description: Full text content of the policy
+        expr: CONTENT
+        data_type: VARCHAR
+
+      - name: policy_version
+        description: Version number of the policy
+        expr: VERSION
+        data_type: VARCHAR
+        synonyms:
+          - version
+
+    time_dimensions:
+      - name: policy_effective_date
+        description: Date the policy becomes effective
+        expr: EFFECTIVE_DATE
+        data_type: DATE
+        synonyms:
+          - effective date
+
+      - name: policy_created_at
+        description: Timestamp when the policy was created
+        expr: CREATED_AT
+        data_type: TIMESTAMP
+
+    metrics:
+      - name: total_policies
+        description: Total number of policy documents
+        expr: COUNT(DISTINCT POLICY_ID)
+        synonyms:
+          - policy count
+
+  # =========================================================================
+  # Knowledge Base: Call Transcripts Table
+  # =========================================================================
+  - name: call_transcripts
+    description: |
+      Transcribed call center conversations with sentiment analysis.
+      Links to members via MEMBER_ID for tracking call history and sentiment.
+    base_table:
+      database: HEALTHCARE_DB
+      schema: KNOWLEDGE_SCHEMA
+      table: CALL_TRANSCRIPTS
+
+    dimensions:
+      - name: transcript_id
+        description: Unique identifier for the transcript
+        expr: TRANSCRIPT_ID
+        data_type: VARCHAR
+        unique: true
+
+      - name: audio_id
+        description: Reference to the original audio file
+        expr: AUDIO_ID
+        data_type: VARCHAR
+
+      - name: transcript_member_id
+        description: Member ID associated with the call
+        expr: MEMBER_ID
+        data_type: VARCHAR
+        synonyms:
+          - caller member id
+
+      - name: transcript_text
+        description: Full transcribed text of the call
+        expr: TRANSCRIPT_TEXT
+        data_type: VARCHAR
+        synonyms:
+          - transcription
+          - call text
+
+      - name: call_summary
+        description: AI-generated summary of the call
+        expr: SUMMARY
+        data_type: VARCHAR
+        synonyms:
+          - summary
+
+      - name: call_sentiment
+        description: Sentiment analysis result (positive, negative, neutral)
+        expr: SENTIMENT
+        data_type: VARIANT
+        synonyms:
+          - sentiment
+
+    time_dimensions:
+      - name: call_date
+        description: Date of the call
+        expr: CALL_DATE
+        data_type: DATE
+        synonyms:
+          - transcript date
+
+      - name: transcript_created_at
+        description: Timestamp when the transcript was created
+        expr: CREATED_AT
+        data_type: TIMESTAMP
+
+    metrics:
+      - name: total_transcripts
+        description: Total number of call transcripts
+        expr: COUNT(DISTINCT TRANSCRIPT_ID)
+        synonyms:
+          - transcript count
+          - call count
+
+# =============================================================================
+# Verified Queries - Known-good SQL for common questions
+# =============================================================================
+verified_queries:
+  # Member Queries - Using logical column names from semantic model
+  - name: member_details
+    question: Tell me about member 470154690
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT DISTINCT
+        member_id, member_name, date_of_birth, gender, address, member_phone,
+        plan_id, plan_name, plan_type, premium,
+        pcp, pcp_phone, coverage_start_date, coverage_end_date
+      FROM __members
+      WHERE member_id = '470154690'
+
+  - name: member_claims
+    question: What claims does member 470154690 have?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT DISTINCT
+        claim_id, claim_service_from_date, claim_service, claim_provider,
+        claim_billed_amount, claim_paid_amount, claim_status
+      FROM __members
+      WHERE member_id = '470154690' AND NOT claim_id IS NULL
+      ORDER BY claim_service_from_date DESC
+
+  - name: total_member_count
+    question: How many members do we have in total?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT COUNT(DISTINCT member_id) AS total_members
+      FROM __members
+
+  - name: total_claims_summary
+    question: What is the total number of claims and amounts?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT 
+        COUNT(DISTINCT claim_id) AS total_claims,
+        SUM(claim_billed_amount) AS total_billed,
+        SUM(claim_paid_amount) AS total_paid
+      FROM __members
+      WHERE NOT claim_id IS NULL
+
+  - name: member_names_list
+    question: List all member names
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT DISTINCT member_id, member_name
+      FROM __members
+      ORDER BY member_name
+      LIMIT 50
+
+  - name: claims_by_status
+    question: How many claims are pending vs paid?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT 
+        claim_status,
+        COUNT(DISTINCT claim_id) AS claim_count,
+        SUM(claim_billed_amount) AS total_billed
+      FROM __members
+      WHERE NOT claim_id IS NULL
+      GROUP BY claim_status
+      ORDER BY claim_count DESC
+
+  - name: members_by_plan_type
+    question: How many members are on each plan type?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT 
+        plan_type,
+        COUNT(DISTINCT member_id) AS member_count
+      FROM __members
+      GROUP BY plan_type
+      ORDER BY member_count DESC
+
+  - name: high_value_claims
+    question: What are the highest value claims?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT DISTINCT
+        member_id, member_name, claim_id, claim_service, 
+        claim_billed_amount, claim_paid_amount, claim_status
+      FROM __members
+      WHERE NOT claim_id IS NULL
+      ORDER BY claim_billed_amount DESC
+      LIMIT 10
+
+  # Knowledge Base Queries - Using logical column names
+  - name: faq_count
+    question: How many FAQs do we have?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT COUNT(DISTINCT faq_id) AS total_faqs
+      FROM __faqs
+
+  - name: faq_categories
+    question: What FAQ categories exist?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT category, COUNT(*) AS faq_count
+      FROM __faqs
+      GROUP BY category
+      ORDER BY faq_count DESC
+
+  - name: all_policies
+    question: List all policies
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT policy_id, policy_name, policy_version, policy_effective_date
+      FROM __policies
+      ORDER BY policy_effective_date DESC
+
+  - name: transcript_count
+    question: How many call transcripts do we have?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT COUNT(DISTINCT transcript_id) AS total_transcripts
+      FROM __call_transcripts
+
+  - name: member_call_history
+    question: Show call history for member 470154690
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT 
+        transcript_id, call_date, call_summary, call_sentiment
+      FROM __call_transcripts
+      WHERE transcript_member_id = '470154690'
+      ORDER BY call_date DESC
+
+  - name: calls_by_date
+    question: How many calls were made each day?
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT 
+        call_date,
+        COUNT(DISTINCT transcript_id) AS call_count
+      FROM __call_transcripts
+      GROUP BY call_date
+      ORDER BY call_date DESC

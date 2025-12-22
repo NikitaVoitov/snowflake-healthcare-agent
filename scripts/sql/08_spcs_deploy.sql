@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.31 (Dec 2024)
+-- Current version: v1.0.35 (Dec 2024) - Improved Snowpark fallback for top N queries
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
@@ -12,6 +12,7 @@
 --   4. Always use versioned image tags (not :latest) for reliable deploys
 --   5. Container name is healthcare-agent (singular), not healthcare-agents
 --   6. Module-level Snowpark session (not ContextVar) for async propagation
+--   7. USE_REACT_WORKFLOW=true enables ReAct reasoning loop with conversation memory
 -- =============================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -41,28 +42,30 @@ DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
 -- -----------------------------------------------------------------------------
 -- Step 4: Create the SPCS Service
 -- -----------------------------------------------------------------------------
--- WORKING version - tested and deployed successfully (v1.0.31)
+-- WORKING version - Cortex Analyst with Semantic Model (v1.0.34)
 CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     IN COMPUTE POOL AGENTS_POOL
     EXTERNAL_ACCESS_INTEGRATIONS = (HEALTHCARE_EXTERNAL_ACCESS)
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 300
-    COMMENT = 'Healthcare Multi-Agent FastAPI Service v1.0.31'
+    COMMENT = 'Healthcare Multi-Agent FastAPI Service v1.0.35 (Top N queries + Semantic Model)'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.31
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.35
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
         SNOWFLAKE_WAREHOUSE: PAYERS_CC_WH
         # Agent configuration
-        MAX_AGENT_STEPS: "3"
-        AGENT_TIMEOUT_SECONDS: "30"
+        MAX_AGENT_STEPS: "5"
+        AGENT_TIMEOUT_SECONDS: "60"
         # Cortex LLM for response synthesis
         CORTEX_LLM_MODEL: "llama3.1-70b"
+        # Enable ReAct workflow (Reasoning + Acting with conversation memory)
+        USE_REACT_WORKFLOW: "true"
       resources:
         requests:
           memory: 2Gi
