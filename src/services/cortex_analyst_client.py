@@ -135,9 +135,7 @@ class AsyncCortexAnalystClient:
         if semantic_model_path:
             self.semantic_model_path = semantic_model_path
         else:
-            self.semantic_model_path = (
-                f"@{self.database}.{self.schema}.SEMANTIC_MODELS/healthcare_semantic_model.yaml"
-            )
+            self.semantic_model_path = f"@{self.database}.{self.schema}.SEMANTIC_MODELS/healthcare_semantic_model.yaml"
 
         # Build API URL from session context
         self._api_url: str | None = None
@@ -174,9 +172,7 @@ class AsyncCortexAnalystClient:
             account = os.environ.get("SNOWFLAKE_ACCOUNT")
 
         if not account:
-            raise ValueError(
-                "Cannot determine Snowflake account. Set SNOWFLAKE_ACCOUNT environment variable."
-            )
+            raise ValueError("Cannot determine Snowflake account. Set SNOWFLAKE_ACCOUNT environment variable.")
 
         # Use account locator directly (e.g., "LFB71918")
         self._api_url = f"https://{account}.snowflakecomputing.com{self.API_PATH}"
@@ -243,9 +239,7 @@ class AsyncCortexAnalystClient:
             JWT token string or None if key-pair auth not configured.
         """
         # Check if key-pair auth is configured
-        key_path_str = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH") or getattr(
-            settings, "snowflake_private_key_path", None
-        )
+        key_path_str = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH") or getattr(settings, "snowflake_private_key_path", None)
         if not key_path_str:
             logger.debug("No private key path configured, JWT auth unavailable")
             return None
@@ -257,9 +251,7 @@ class AsyncCortexAnalystClient:
                 return None
 
             # Load private key - check both env var and settings for passphrase
-            passphrase = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE") or getattr(
-                settings, "snowflake_private_key_passphrase", None
-            )
+            passphrase = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE") or getattr(settings, "snowflake_private_key_passphrase", None)
             with open(key_path, "rb") as f:
                 private_key = serialization.load_pem_private_key(
                     f.read(),
@@ -346,9 +338,7 @@ class AsyncCortexAnalystClient:
             "stream": stream,
         }
 
-    def _parse_response(
-        self, response_data: dict[str, Any], request_id: str | None
-    ) -> CortexAnalystResponse:
+    def _parse_response(self, response_data: dict[str, Any], request_id: str | None) -> CortexAnalystResponse:
         """Parse API response into structured format.
 
         Args:
@@ -472,9 +462,9 @@ class AsyncCortexAnalystClient:
         # Update conversation history
         self._update_history(question, result)
 
-        # Log result summary
+        # Log result summary with SQL preview for debugging
         if result.sql:
-            logger.info(f"Generated SQL ({len(result.sql)} chars)")
+            logger.info(f"Generated SQL ({len(result.sql)} chars): {result.sql[:200]}...")
         elif result.suggestions:
             logger.info(f"Received {len(result.suggestions)} suggestions (ambiguous query)")
         else:

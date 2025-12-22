@@ -1,31 +1,26 @@
-"""Graphs package exports - ReAct workflow only.
+"""Graphs package exports - Modern ReAct workflow.
 
-Note: Some imports are structured to avoid circular dependencies.
-Import directly from submodules when needed for full access.
+Uses message-based state with ToolNode for automatic tool execution.
 """
 
 from src.graphs.react_state import (
     ConversationTurn,
     ErrorHandlerOutput,
     FinalAnswerOutput,
-    HealthcareReActState,
-    ObservationOutput,
-    ReActStep,
-    ReasonerOutput,
-    ToolOutput,
+    HealthcareAgentState,
+    ModelOutput,
+    ToolsOutput,
 )
 
 # Workflow functions are imported lazily to avoid circular import
 # Use: from src.graphs.react_workflow import build_react_graph, ...
 
 __all__ = [
-    # ReAct state types
-    "HealthcareReActState",
-    "ReActStep",
+    # State types
+    "HealthcareAgentState",
     "ConversationTurn",
-    "ReasonerOutput",
-    "ToolOutput",
-    "ObservationOutput",
+    "ModelOutput",
+    "ToolsOutput",
     "FinalAnswerOutput",
     "ErrorHandlerOutput",
 ]

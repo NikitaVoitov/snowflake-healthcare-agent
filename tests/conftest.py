@@ -5,9 +5,10 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.config import Settings
-from src.graphs.react_state import ConversationTurn, HealthcareReActState, ReActStep
+from src.graphs.react_state import ConversationTurn, HealthcareAgentState
 from src.models.requests import QueryRequest
 from src.models.responses import AgentResponse
 
@@ -44,26 +45,22 @@ def mock_settings() -> MagicMock:
     return settings
 
 
-# --- ReAct State Fixtures ---
+# --- Modern Message-Based State Fixtures ---
 
 
 @pytest.fixture
-def initial_react_state() -> HealthcareReActState:
-    """Create minimal initial ReAct state for testing."""
-    return HealthcareReActState(
+def initial_state() -> HealthcareAgentState:
+    """Create minimal initial state for testing."""
+    return HealthcareAgentState(
+        messages=[HumanMessage(content="What are my benefits?")],
         user_query="What are my benefits?",
         member_id="106742775",
         tenant_id="test_tenant",
         conversation_history=[],
-        scratchpad=[],
-        current_step=None,
         iteration=0,
         max_iterations=5,
-        tool_result=None,
-        final_answer=None,
         execution_id="test-exec-001",
-        thread_checkpoint_id=None,
-        current_node="start",
+        final_answer=None,
         error_count=0,
         last_error=None,
         has_error=False,
@@ -71,9 +68,10 @@ def initial_react_state() -> HealthcareReActState:
 
 
 @pytest.fixture
-def react_state_with_history() -> HealthcareReActState:
-    """ReAct state with conversation history for continuation testing."""
-    return HealthcareReActState(
+def state_with_history() -> HealthcareAgentState:
+    """State with conversation history for continuation testing."""
+    return HealthcareAgentState(
+        messages=[HumanMessage(content="What is their plan type?")],
         user_query="What is their plan type?",
         member_id=None,  # Should be inferred from history
         tenant_id="test_tenant",
@@ -85,15 +83,10 @@ def react_state_with_history() -> HealthcareReActState:
                 tools_used=["query_member_data"],
             ),
         ],
-        scratchpad=[],
-        current_step=None,
         iteration=0,
         max_iterations=5,
-        tool_result=None,
-        final_answer=None,
         execution_id="test-exec-002",
-        thread_checkpoint_id=None,
-        current_node="start",
+        final_answer=None,
         error_count=0,
         last_error=None,
         has_error=False,
@@ -101,29 +94,34 @@ def react_state_with_history() -> HealthcareReActState:
 
 
 @pytest.fixture
-def react_state_after_tool() -> HealthcareReActState:
-    """ReAct state after tool execution with observation."""
-    return HealthcareReActState(
+def state_after_tool() -> HealthcareAgentState:
+    """State after tool execution with messages."""
+    return HealthcareAgentState(
+        messages=[
+            HumanMessage(content="What claims have I submitted?"),
+            AIMessage(
+                content="I need to query the member database for claims.",
+                tool_calls=[
+                    {
+                        "id": "call_test123",
+                        "name": "query_member_data",
+                        "args": {"query": "claims for member", "member_id": "106742775"},
+                    }
+                ],
+            ),
+            ToolMessage(
+                content="[Database Query Results] Claims found: 3",
+                tool_call_id="call_test123",
+            ),
+        ],
         user_query="What claims have I submitted?",
         member_id="106742775",
         tenant_id="test_tenant",
         conversation_history=[],
-        scratchpad=[
-            ReActStep(
-                thought="I need to query the member database for claims information.",
-                action="query_member_data",
-                action_input={"query": "claims for member", "member_id": "106742775"},
-                observation="[Database Query Results] Claims found: 3",
-            ),
-        ],
-        current_step=None,
         iteration=1,
         max_iterations=5,
-        tool_result=None,
-        final_answer=None,
         execution_id="test-exec-003",
-        thread_checkpoint_id=None,
-        current_node="reasoner",
+        final_answer=None,
         error_count=0,
         last_error=None,
         has_error=False,
@@ -131,22 +129,18 @@ def react_state_after_tool() -> HealthcareReActState:
 
 
 @pytest.fixture
-def react_error_state() -> HealthcareReActState:
-    """ReAct state with error condition."""
-    return HealthcareReActState(
+def error_state() -> HealthcareAgentState:
+    """State with error condition."""
+    return HealthcareAgentState(
+        messages=[HumanMessage(content="trigger error")],
         user_query="trigger error",
         member_id=None,
         tenant_id="test_tenant",
         conversation_history=[],
-        scratchpad=[],
-        current_step=None,
         iteration=3,
         max_iterations=5,
-        tool_result=None,
-        final_answer=None,
         execution_id="test-exec-error",
-        thread_checkpoint_id=None,
-        current_node="error_handler",
+        final_answer=None,
         error_count=2,
         last_error={"error_type": "cortex_api", "message": "Service unavailable"},
         has_error=True,
@@ -242,26 +236,29 @@ def mock_compiled_graph() -> AsyncMock:
     """Mock compiled LangGraph for testing without full graph execution."""
     mock = AsyncMock()
     mock.ainvoke.return_value = {
+        "messages": [
+            HumanMessage(content="What are my benefits?"),
+            AIMessage(
+                content="I need to query member data.",
+                tool_calls=[
+                    {
+                        "id": "call_test",
+                        "name": "query_member_data",
+                        "args": {"query": "benefits", "member_id": "106742775"},
+                    }
+                ],
+            ),
+            ToolMessage(content="[Database Query] Benefits info found.", tool_call_id="call_test"),
+            AIMessage(content="Based on your records, your benefits include..."),
+        ],
         "user_query": "What are my benefits?",
         "member_id": "106742775",
         "tenant_id": "test_tenant",
         "conversation_history": [],
-        "scratchpad": [
-            {
-                "thought": "I need to query member data.",
-                "action": "query_member_data",
-                "action_input": {"query": "benefits", "member_id": "106742775"},
-                "observation": "[Database Query] Benefits info found.",
-            }
-        ],
-        "current_step": None,
         "iteration": 2,
         "max_iterations": 5,
-        "tool_result": None,
         "final_answer": "Based on your records, your benefits include...",
         "execution_id": "test-exec",
-        "thread_checkpoint_id": "chk-001",
-        "current_node": "final_answer",
         "error_count": 0,
         "last_error": None,
         "has_error": False,
@@ -269,9 +266,22 @@ def mock_compiled_graph() -> AsyncMock:
 
     async def mock_stream(*_args: object, **_kwargs: object) -> AsyncIterator[dict]:
         """Mock streaming."""
-        yield {"reasoner": {"current_step": {"action": "query_member_data"}, "iteration": 1}}
-        yield {"analyst_tool": {"tool_result": "Member data found"}}
-        yield {"observation": {"scratchpad": []}}
+        yield {
+            "model": {
+                "messages": [
+                    AIMessage(
+                        content="Querying...",
+                        tool_calls=[{"id": "call_1", "name": "query_member_data", "args": {}}],
+                    )
+                ],
+                "iteration": 1,
+            }
+        }
+        yield {
+            "tools": {
+                "messages": [ToolMessage(content="Member data found", tool_call_id="call_1")]
+            }
+        }
         yield {"final_answer": {"final_answer": "Response..."}}
 
     mock.astream = mock_stream

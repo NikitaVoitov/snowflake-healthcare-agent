@@ -31,10 +31,13 @@ TOOLS:
    Input: {"query": "search terms including person name for call lookups"}
    NOTE: This searches FAQs, policies, AND call transcript summaries!
 
-RESPONSE FORMAT:
-Thought: [Your reasoning]
-Action: [query_member_data, search_knowledge, or FINAL_ANSWER]
-Action Input: [JSON parameters]
+RESPONSE FORMAT - Respond in JSON:
+You MUST respond with valid JSON containing these fields:
+{
+  "thought": "Your reasoning about what to do next",
+  "action": "query_member_data" | "search_knowledge" | "FINAL_ANSWER",
+  "action_input": {"query": "...", "member_id": "..." or null} or {"answer": "final response text"}
+}
 
 CRITICAL TOOL SELECTION RULES:
 1. **CALL HISTORY / CALL TRANSCRIPTS**: ALWAYS use search_knowledge!
@@ -162,6 +165,7 @@ def build_react_prompt(
     member_id: str | None,
     scratchpad: list[dict],
     conversation_history: list[ConversationTurn] | None = None,
+    member_context: str | None = None,
 ) -> str:
     """Build the complete ReAct prompt for the reasoner.
 
@@ -170,6 +174,7 @@ def build_react_prompt(
         member_id: Optional member ID for context.
         scratchpad: History of previous reasoning steps (current turn).
         conversation_history: Previous conversation turns for context.
+        member_context: Optional pre-formatted member context string.
 
     Returns:
         Complete prompt string for Cortex COMPLETE.
@@ -180,16 +185,17 @@ def build_react_prompt(
     # Format current turn scratchpad
     scratchpad_text = format_scratchpad(scratchpad)
 
-    # Determine member context - check history if not provided
-    if member_id:
-        member_context = f"Member ID: {member_id}"
-    else:
-        # Try to get member_id from conversation history
-        historical_member_id = extract_member_id_from_history(conversation_history or [])
-        if historical_member_id:
-            member_context = f"Member ID: {historical_member_id} (from previous conversation)"
+    # Determine member context - use provided or build from member_id
+    if member_context is None:
+        if member_id:
+            member_context = f"Member ID: {member_id}"
         else:
-            member_context = "Member ID: Not provided (general query)"
+            # Try to get member_id from conversation history
+            historical_member_id = extract_member_id_from_history(conversation_history or [])
+            if historical_member_id:
+                member_context = f"Member ID: {historical_member_id} (from previous conversation)"
+            else:
+                member_context = "Member ID: Not provided (general query)"
 
     return f"""{REACT_SYSTEM_PROMPT}
 

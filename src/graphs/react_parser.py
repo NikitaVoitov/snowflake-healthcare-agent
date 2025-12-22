@@ -51,6 +51,9 @@ def parse_react_response(response: str) -> dict:
     Expects direct JSON from Cortex COMPLETE with response_format:
         {"thought": "...", "action": "...", "action_input": {...}}
 
+    Following Snowflake docs:
+    https://docs.snowflake.com/en/user-guide/snowflake-cortex/complete-structured-outputs
+
     Args:
         response: JSON string from Cortex COMPLETE structured output.
 

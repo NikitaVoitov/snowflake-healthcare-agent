@@ -341,21 +341,19 @@ class TestRealCheckpointer:
         thread_id = f"real-test-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         config = {"configurable": {"thread_id": thread_id}}
 
+        from langchain_core.messages import HumanMessage
+
         result = await graph.ainvoke(
             {
+                "messages": [HumanMessage(content="What are my claims?")],
                 "user_query": "What are my claims?",
                 "member_id": "106742775",
                 "tenant_id": "test_tenant",
                 "conversation_history": [],
-                "scratchpad": [],
-                "current_step": None,
                 "iteration": 0,
                 "max_iterations": 5,
-                "tool_result": None,
                 "final_answer": None,
                 "execution_id": thread_id,
-                "thread_checkpoint_id": None,
-                "current_node": "start",
                 "error_count": 0,
                 "last_error": None,
                 "has_error": False,

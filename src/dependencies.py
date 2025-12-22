@@ -14,7 +14,7 @@ from langgraph.pregel import Pregel
 from src.config import Settings, settings
 from src.graphs.react_workflow import compile_react_graph
 from src.services.checkpointer import create_checkpointer
-from src.services.react_agent_service import ReActAgentService
+from src.services.react_agent_service import AgentService
 
 logger = logging.getLogger(__name__)
 
@@ -54,21 +54,21 @@ def get_compiled_graph() -> Pregel:
 def get_agent_service(
     graph: Annotated[Pregel, Depends(get_compiled_graph)],
     app_settings: Annotated[Settings, Depends(get_settings)],
-) -> ReActAgentService:
-    """Provide configured ReAct agent service.
+) -> AgentService:
+    """Provide configured agent service.
 
     Args:
-        graph: Compiled ReAct workflow graph (Pregel instance).
+        graph: Compiled workflow graph (Pregel instance).
         app_settings: Application settings.
 
     Returns:
-        Configured ReActAgentService instance.
+        Configured AgentService instance.
     """
-    return ReActAgentService(graph, app_settings)
+    return AgentService(graph, app_settings)
 
 
 # Type aliases for cleaner route signatures
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 GraphDep = Annotated[Pregel, Depends(get_compiled_graph)]
-AgentServiceDep = Annotated[ReActAgentService, Depends(get_agent_service)]
+AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 CheckpointerDep = Annotated[BaseCheckpointSaver, Depends(get_checkpointer)]

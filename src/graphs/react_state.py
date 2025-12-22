@@ -1,27 +1,21 @@
 """ReAct state definitions for Healthcare Agent workflow.
 
-Implements the Reasoning + Acting pattern with iterative tool execution.
-The agent alternates between thinking, acting, and observing until
-it can deliver a final answer.
+Uses LangGraph's message-based state pattern for compatibility with
+ToolNode and modern agent patterns.
 
-Conversation history is persisted via the Snowflake checkpointer,
-enabling context continuity across turns in SPCS deployments.
+The messages field accumulates the conversation within a single turn:
+- HumanMessage: User query
+- AIMessage with tool_calls: Model decides to call a tool
+- ToolMessage: Tool execution result
+- AIMessage with content: Final answer
+
+Conversation history persists across turns via the Snowflake checkpointer.
 """
 
 from typing import Annotated, TypedDict
 
-
-class ReActStep(TypedDict):
-    """A single step in the ReAct loop.
-
-    Each step captures the model's reasoning, its decision to act,
-    the action parameters, and the resulting observation.
-    """
-
-    thought: str  # Model's reasoning about what to do
-    action: str  # Tool name or "FINAL_ANSWER"
-    action_input: dict  # JSON arguments for the tool
-    observation: str  # Tool result (filled after execution)
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 
 
 class ConversationTurn(TypedDict):
@@ -36,7 +30,9 @@ class ConversationTurn(TypedDict):
     tools_used: list[str]  # Tools used in this turn (for context)
 
 
-def _append_turns(existing: list[ConversationTurn], new: list[ConversationTurn]) -> list[ConversationTurn]:
+def _append_turns(
+    existing: list[ConversationTurn], new: list[ConversationTurn]
+) -> list[ConversationTurn]:
     """Reducer to append new conversation turns to existing history.
 
     LangGraph uses this to merge state updates. We keep a sliding window
@@ -47,41 +43,52 @@ def _append_turns(existing: list[ConversationTurn], new: list[ConversationTurn])
     return combined[-max_turns:]
 
 
-class HealthcareReActState(TypedDict, total=False):
-    """State for ReAct-based healthcare agent workflow.
+class HealthcareAgentState(TypedDict, total=False):
+    """Message-based state for healthcare agent workflow.
 
-    The scratchpad accumulates all reasoning steps within a single turn.
-    The conversation_history persists across turns via the checkpointer,
-    enabling the agent to maintain context in multi-turn conversations.
+    Uses LangGraph's add_messages reducer for the messages field,
+    enabling automatic handling of message deduplication and updates.
+
+    The messages field replaces the old scratchpad pattern:
+    - Old: scratchpad with ReActStep dicts
+    - New: messages with HumanMessage, AIMessage (tool_calls), ToolMessage
     """
 
-    # Input fields (current turn)
-    user_query: str
-    member_id: str | None
-    tenant_id: str
+    # ==========================================================================
+    # Core Message Stream (LangGraph standard pattern)
+    # ==========================================================================
+    # Messages accumulate via add_messages reducer:
+    # [HumanMessage] → [HumanMessage, AIMessage(tool_calls)] →
+    # [HumanMessage, AIMessage(tool_calls), ToolMessage] → ...
+    messages: Annotated[list[AnyMessage], add_messages]
 
+    # ==========================================================================
+    # Healthcare Context (custom fields)
+    # ==========================================================================
+    user_query: str  # Original query (kept for reference)
+    member_id: str | None  # Member context from session
+    tenant_id: str  # Multi-tenant identifier
+
+    # ==========================================================================
     # Conversation History (persisted across turns via checkpointer)
-    # Uses Annotated with reducer to properly accumulate turns
+    # ==========================================================================
     conversation_history: Annotated[list[ConversationTurn], _append_turns]
 
-    # ReAct Loop State (current turn only)
-    scratchpad: list[ReActStep]  # History of thought/action/observation
-    current_step: ReActStep | None  # Active step being processed
-    iteration: int  # Current iteration count
+    # ==========================================================================
+    # Execution Control
+    # ==========================================================================
+    iteration: int  # Current iteration count in ReAct loop
     max_iterations: int  # Safety limit (default: 5)
+    execution_id: str  # Unique ID for this execution
 
-    # Tool execution
-    tool_result: str | None  # Result from last tool execution
-
+    # ==========================================================================
     # Output
-    final_answer: str | None
+    # ==========================================================================
+    final_answer: str | None  # Final response to user
 
-    # Execution tracking
-    execution_id: str
-    thread_checkpoint_id: str | None
-    current_node: str  # Track which node we're in
-
-    # Error handling
+    # ==========================================================================
+    # Error Handling
+    # ==========================================================================
     error_count: int
     last_error: dict | None
     has_error: bool
@@ -92,30 +99,25 @@ class HealthcareReActState(TypedDict, total=False):
 # =============================================================================
 
 
-class ReasonerOutput(TypedDict, total=False):
-    """Output from reasoner node."""
+class ModelOutput(TypedDict, total=False):
+    """Output from model node (call_model).
 
-    current_step: ReActStep | None
+    Returns AIMessage which gets added to messages via reducer.
+    """
+
+    messages: list[AnyMessage]  # Single AIMessage to append
     iteration: int
     has_error: bool
     last_error: dict | None
 
 
-class ToolOutput(TypedDict, total=False):
-    """Output from tool execution nodes."""
+class ToolsOutput(TypedDict, total=False):
+    """Output from ToolNode.
 
-    tool_result: str
-    has_error: bool
-    last_error: dict | None
-    error_count: int
+    Returns ToolMessage(s) which get added to messages via reducer.
+    """
 
-
-class ObservationOutput(TypedDict, total=False):
-    """Output from observation node."""
-
-    scratchpad: list[ReActStep]
-    current_step: None  # Always None after observation
-    tool_result: None  # Cleared after capture
+    messages: list[AnyMessage]  # ToolMessage(s) to append
 
 
 class FinalAnswerOutput(TypedDict, total=False):
@@ -125,8 +127,7 @@ class FinalAnswerOutput(TypedDict, total=False):
     """
 
     final_answer: str
-    current_node: str
-    conversation_history: list[ConversationTurn]  # Append completed turn
+    conversation_history: list[ConversationTurn]
 
 
 class ErrorHandlerOutput(TypedDict, total=False):
@@ -135,5 +136,4 @@ class ErrorHandlerOutput(TypedDict, total=False):
     has_error: bool
     error_count: int
     last_error: dict | None
-    current_node: str
-
+    messages: list[AnyMessage]  # Error message to append

@@ -9,8 +9,8 @@ from src.services.cortex_analyst_client import AsyncCortexAnalystClient
 from src.services.cortex_tools import AsyncCortexAnalystTool, AsyncCortexSearchTool
 from src.services.snowflake_checkpointer import CustomAsyncSnowflakeSaver
 
-# ReActAgentService is imported lazily to avoid circular import with react_workflow
-# Use: from src.services.react_agent_service import ReActAgentService
+# AgentService is imported lazily to avoid circular import with react_workflow
+# Use: from src.services.react_agent_service import AgentService
 
 __all__ = [
     "AsyncCortexAnalystTool",

@@ -1,92 +1,48 @@
-"""ReAct workflow implementation for Healthcare Agent.
+"""Modern ReAct workflow using LangGraph message-based state and ToolNode.
 
-Implements the Reasoning + Acting pattern with iterative tool execution.
-The agent alternates between thinking, acting, and observing until
-it can deliver a final answer.
+Implements the Reasoning + Acting pattern with:
+- Message-based state (HumanMessage, AIMessage, ToolMessage)
+- @tool decorated functions for automatic schema generation
+- ToolNode for automatic tool execution
+- Tool calls routing via AIMessage.tool_calls
 
-Uses Snowflake Cortex COMPLETE with structured output for reliable
-Thought/Action/Action Input parsing.
+Uses Snowflake Cortex COMPLETE with structured output, wrapped to return
+AIMessage objects with tool_calls for LangGraph compatibility.
 """
 
 import asyncio
 import logging
+import uuid
 from typing import Literal
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
+from langgraph.prebuilt import ToolNode
 
 from src.config import settings
-from src.graphs.react_parser import format_observation, parse_react_response
 from src.graphs.react_prompts import build_react_prompt
 from src.graphs.react_state import (
     ConversationTurn,
     ErrorHandlerOutput,
     FinalAnswerOutput,
-    HealthcareReActState,
-    ObservationOutput,
-    ReActStep,
-    ReasonerOutput,
-    ToolOutput,
+    HealthcareAgentState,
+    ModelOutput,
 )
-from src.services.cortex_tools import AsyncCortexAnalystTool, AsyncCortexSearchTool
+from src.tools.healthcare_tools import get_healthcare_tools
+from src.tools.healthcare_tools import set_snowpark_session as set_tools_session
 
 logger = logging.getLogger(__name__)
 
 # Module-level session for SPCS OAuth token auth
 _snowpark_session = None
 
-# =============================================================================
-# Structured Output Schema for Cortex COMPLETE
-# =============================================================================
+# Get tools for ToolNode
+HEALTHCARE_TOOLS = get_healthcare_tools()
+TOOL_NODE = ToolNode(HEALTHCARE_TOOLS)
 
-# JSON Schema for ReAct response format - ensures LLM returns valid structured data
-REACT_RESPONSE_SCHEMA = {
-    "type": "json",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "thought": {
-                "type": "string",
-                "description": "Your reasoning about what to do next",
-            },
-            "action": {
-                "type": "string",
-                "enum": ["query_member_data", "search_knowledge", "FINAL_ANSWER"],
-                "description": "The tool to use or FINAL_ANSWER to respond",
-            },
-            "action_input": {
-                "type": "object",
-                "description": "Parameters for the action",
-                "properties": {
-                    "query": {"type": "string"},
-                    "member_id": {"type": ["string", "null"]},
-                    "answer": {"type": "string"},
-                },
-            },
-        },
-        "required": ["thought", "action", "action_input"],
-    },
-}
-
-# SQL-formatted schema for AI_COMPLETE structured output
-# Uses Snowflake's JSON schema format with named parameters
-REACT_RESPONSE_FORMAT_SQL = (
-    "{"
-    "'type': 'json', "
-    "'schema': {"
-    "'type': 'object', "
-    "'properties': {"
-    "'thought': {'type': 'string'}, "
-    "'action': {'type': 'string', "
-    "'enum': ['query_member_data', 'search_knowledge', 'FINAL_ANSWER']}, "
-    "'action_input': {'type': 'object', "
-    "'properties': {"
-    "'query': {'type': 'string'}, "
-    "'member_id': {'type': ['string', 'null']}, "
-    "'answer': {'type': 'string'}}}}, "
-    "'required': ['thought', 'action', 'action_input']"
-    "}}"
-)
+# Tool name to function mapping for schema generation
+TOOLS_BY_NAME = {tool.name: tool for tool in HEALTHCARE_TOOLS}
 
 
 def set_snowpark_session(session) -> None:
@@ -96,519 +52,374 @@ def set_snowpark_session(session) -> None:
     """
     global _snowpark_session
     _snowpark_session = session
+    # Also set session for tools module
+    set_tools_session(session)
     logger.info("Snowpark session set for ReAct workflow")
 
 
-def get_snowpark_session():
-    """Get the current Snowpark session.
-
-    Returns:
-        Active Snowpark Session or None if not set.
-    """
-    return _snowpark_session
-
-
 # =============================================================================
-# Helper Functions
+# Cortex COMPLETE Wrapper - Returns AIMessage with tool_calls
 # =============================================================================
 
 
-def _synthesize_fallback_answer(state: HealthcareReActState) -> str:
-    """Synthesize a user-friendly fallback answer from scratchpad observations.
+# Response format schema for AI_COMPLETE structured output
+# Following Snowflake docs: https://docs.snowflake.com/en/user-guide/snowflake-cortex/complete-structured-outputs
+RESPONSE_FORMAT_SQL = """{
+    'type': 'json',
+    'schema': {
+        'type': 'object',
+        'properties': {
+            'thought': {'type': 'string'},
+            'action': {'type': 'string'},
+            'action_input': {
+                'type': 'object',
+                'properties': {
+                    'query': {'type': 'string'},
+                    'member_id': {'type': ['string', 'null']},
+                    'answer': {'type': 'string'}
+                },
+                'required': ['query']
+            }
+        },
+        'required': ['thought', 'action', 'action_input']
+    }
+}"""
 
-    When the LLM fails to provide a proper FINAL_ANSWER, this function
-    extracts useful information from tool observations to provide a
-    meaningful response instead of leaking internal reasoning.
+
+async def call_cortex_complete(prompt: str, model: str = "llama3.1-70b") -> AIMessage:
+    """Call Snowflake Cortex AI_COMPLETE with structured output and return AIMessage.
+
+    Uses SQL-based AI_COMPLETE with named parameters:
+    - model_parameters for temperature
+    - response_format for JSON schema
 
     Args:
-        state: Current ReAct state with scratchpad.
+        prompt: Full prompt including system message and conversation.
+        model: Cortex model to use.
 
     Returns:
-        User-friendly answer string.
+        AIMessage with either tool_calls or content.
     """
-    scratchpad = state.get("scratchpad", [])
-    user_query = state.get("user_query", "your question")
+    if _snowpark_session is None:
+        logger.error("No Snowpark session available")
+        return AIMessage(content="I apologize, but I cannot process your request at this time.")
 
-    if not scratchpad:
-        return f"I apologize, but I couldn't find the information to answer: {user_query}"
+    # Escape single quotes for SQL string
+    escaped_prompt = prompt.replace("'", "''")
 
-    # Collect observations from tools
-    observations = []
-    for step in scratchpad:
-        obs = step.get("observation", "")
-        if obs and not obs.startswith("[Error]"):
-            observations.append(obs)
-
-    if not observations:
-        return f"I apologize, but I encountered issues while searching for information about: {user_query}"
-
-    # Build a response from observations
-    response_parts = ["Based on my search, here's what I found:\n"]
-
-    for obs in observations:
-        # Clean up the observation for user presentation
-        # Remove internal prefixes like "[Database Query Results]"
-        cleaned = obs
-        if cleaned.startswith("["):
-            # Find the closing bracket and skip the prefix
-            bracket_end = cleaned.find("]")
-            if bracket_end > 0:
-                cleaned = cleaned[bracket_end + 1 :].strip()
-
-        if cleaned:
-            response_parts.append(cleaned)
-
-    if len(response_parts) == 1:
-        # No useful observations extracted
-        return f"I searched for information but couldn't find a definitive answer to: {user_query}"
-
-    response_parts.append("\n\nIf you need more specific information, please let me know.")
-    return "\n".join(response_parts)
-
-
-# =============================================================================
-# ReAct Nodes
-# =============================================================================
-
-
-async def reasoner_node(state: HealthcareReActState) -> ReasonerOutput:
-    """Reasoning node that decides what action to take next.
-
-    Uses Cortex COMPLETE with structured output to analyze the query and
-    scratchpad, returning a guaranteed JSON response with Thought/Action/Action Input.
-
-    Args:
-        state: Current ReAct state with user_query and scratchpad.
-
-    Returns:
-        ReasonerOutput with current_step containing the reasoning decision.
+    # Build SQL with AI_COMPLETE using named parameters (per Snowflake docs)
+    sql = f"""
+    SELECT AI_COMPLETE(
+        model => '{model}',
+        prompt => '{escaped_prompt}',
+        model_parameters => {{'temperature': 0}},
+        response_format => {RESPONSE_FORMAT_SQL}
+    ) AS response
     """
-    session = get_snowpark_session()
-    if not session:
-        logger.error("No Snowpark session available for reasoner")
-        return ReasonerOutput(
-            current_step=ReActStep(
-                thought="System error - no database connection",
-                action="FINAL_ANSWER",
-                action_input={"answer": "I apologize, but I'm unable to process your request due to a system issue."},
-                observation="",
-            ),
-            iteration=state.get("iteration", 0) + 1,
-            has_error=True,
-            last_error={"message": "No Snowpark session", "node": "reasoner"},
-        )
 
-    # Build the ReAct prompt with conversation history for context
-    prompt = build_react_prompt(
-        user_query=state.get("user_query", ""),
-        member_id=state.get("member_id"),
-        scratchpad=state.get("scratchpad", []),
-        conversation_history=state.get("conversation_history", []),
-    )
+    def _execute_sql():
+        """Execute SQL (blocking call)."""
+        return _snowpark_session.sql(sql).collect()
 
     try:
-        # Escape single quotes for SQL
-        escaped_prompt = prompt.replace("'", "''")
-        model = getattr(settings, "cortex_llm_model", "llama3.1-70b")
+        # Run blocking SQL in thread pool
+        result = await asyncio.to_thread(_execute_sql)
 
-        # Use AI_COMPLETE with structured output for reliable JSON parsing
-        # Named parameters with => syntax, response_format as separate parameter
-        sql = f"""
-        SELECT AI_COMPLETE(
-            model => '{model}',
-            prompt => '{escaped_prompt}',
-            response_format => {REACT_RESPONSE_FORMAT_SQL}
-        ) AS response
-        """
+        if not result:
+            logger.error("Empty result from AI_COMPLETE")
+            return AIMessage(content="I couldn't process your request.")
 
-        # Execute in thread pool to avoid blocking the event loop
-        def _execute_cortex_complete():
-            return session.sql(sql).collect()
+        # Get the response - AI_COMPLETE returns the result directly
+        response_text = result[0]["RESPONSE"]
+        logger.info(f"Raw LLM response type: {type(response_text)}, value: {str(response_text)[:300]}")
 
-        result = await asyncio.to_thread(_execute_cortex_complete)
-        response_text = result[0][0] if result else ""
+        # Parse the structured JSON response
+        import orjson
 
-        logger.debug(f"Reasoner LLM response: {response_text[:500]}...")
+        if response_text is None:
+            logger.error("AI_COMPLETE returned None")
+            return AIMessage(content="I couldn't generate a response.")
 
-        # Parse the structured JSON response from Cortex COMPLETE
-        parsed = parse_react_response(response_text)
+        # Handle both string and dict responses
+        if isinstance(response_text, str):
+            parsed = orjson.loads(response_text)
+        elif isinstance(response_text, dict):
+            parsed = response_text
+        else:
+            logger.error(f"Unexpected response type: {type(response_text)}")
+            return AIMessage(content="I encountered an unexpected response format.")
 
-        current_step = ReActStep(
-            thought=parsed["thought"],
-            action=parsed["action"],
-            action_input=parsed["action_input"],
-            observation="",  # Will be filled by tool execution
+        thought = parsed.get("thought", "")
+        action = parsed.get("action", "FINAL_ANSWER")
+        action_input = parsed.get("action_input", {})
+
+        logger.info(f"Cortex COMPLETE: action={action}, thought={thought[:50]}...")
+
+        # Convert to AIMessage
+        if action == "FINAL_ANSWER":
+            # Final answer - return AIMessage with content
+            answer = action_input.get("answer", thought)
+            return AIMessage(content=answer)
+
+        # Tool call - return AIMessage with tool_calls
+        tool_call_id = f"call_{uuid.uuid4().hex[:8]}"
+
+        # Build tool arguments based on tool schema
+        tool_args = {}
+        if action == "query_member_data":
+            tool_args["query"] = action_input.get("query", "")
+            if action_input.get("member_id"):
+                tool_args["member_id"] = action_input["member_id"]
+        elif action == "search_knowledge":
+            tool_args["query"] = action_input.get("query", "")
+
+        return AIMessage(
+            content=thought,  # Store thought in content for debugging
+            tool_calls=[
+                {
+                    "id": tool_call_id,
+                    "name": action,
+                    "args": tool_args,
+                }
+            ],
         )
 
-        iteration = state.get("iteration", 0) + 1
-        logger.info(f"ReAct iteration {iteration}: action={parsed['action']}")
-
-        return ReasonerOutput(
-            current_step=current_step,
-            iteration=iteration,
-            has_error=False,
-        )
-
-    except Exception as exc:
-        logger.error(f"Reasoner error: {exc}", exc_info=True)
-        return ReasonerOutput(
-            current_step=ReActStep(
-                thought="Error during reasoning",
-                action="FINAL_ANSWER",
-                action_input={"answer": "I apologize, but I encountered an error while processing your request."},
-                observation="",
-            ),
-            iteration=state.get("iteration", 0) + 1,
-            has_error=True,
-            last_error={"message": str(exc), "node": "reasoner"},
-        )
+    except Exception as e:
+        logger.error(f"Cortex COMPLETE failed: {e}")
+        return AIMessage(content=f"I encountered an error: {str(e)}")
 
 
-async def analyst_tool_node(state: HealthcareReActState) -> ToolOutput:
-    """Execute Cortex Analyst for database queries.
-
-    Args:
-        state: Current state with action_input from reasoner.
-
-    Returns:
-        ToolOutput with formatted observation.
-    """
-    session = get_snowpark_session()
-    if not session:
-        return ToolOutput(
-            tool_result="[Error] Database connection unavailable",
-            has_error=True,
-            last_error={"message": "No Snowpark session", "node": "analyst_tool"},
-            error_count=state.get("error_count", 0) + 1,
-        )
-
-    current_step = state.get("current_step")
-    if not current_step:
-        return ToolOutput(
-            tool_result="[Error] No action specified",
-            has_error=True,
-            last_error={"message": "Missing current_step", "node": "analyst_tool"},
-            error_count=state.get("error_count", 0) + 1,
-        )
-
-    action_input = current_step.get("action_input", {})
-    query = action_input.get("query", state.get("user_query", ""))
-    member_id = action_input.get("member_id", state.get("member_id"))
-
-    try:
-        analyst_tool = AsyncCortexAnalystTool(session)
-        result = await analyst_tool.execute(query, member_id)
-
-        # Format as observation
-        observation = format_observation("query_member_data", result)
-
-        logger.info(f"Analyst tool completed: {len(observation)} chars")
-        return ToolOutput(
-            tool_result=observation,
-            has_error=False,
-        )
-
-    except Exception as exc:
-        logger.error(f"Analyst tool error: {exc}", exc_info=True)
-        return ToolOutput(
-            tool_result=f"[Error] Database query failed: {exc}",
-            has_error=True,
-            last_error={"message": str(exc), "node": "analyst_tool"},
-            error_count=state.get("error_count", 0) + 1,
-        )
+# =============================================================================
+# Graph Nodes
+# =============================================================================
 
 
-async def search_tool_node(state: HealthcareReActState) -> ToolOutput:
-    """Execute Cortex Search for knowledge base queries.
-
-    Args:
-        state: Current state with action_input from reasoner.
-
-    Returns:
-        ToolOutput with formatted observation.
-    """
-    session = get_snowpark_session()
-    if not session:
-        return ToolOutput(
-            tool_result="[Error] Database connection unavailable",
-            has_error=True,
-            last_error={"message": "No Snowpark session", "node": "search_tool"},
-            error_count=state.get("error_count", 0) + 1,
-        )
-
-    current_step = state.get("current_step")
-    if not current_step:
-        return ToolOutput(
-            tool_result="[Error] No action specified",
-            has_error=True,
-            last_error={"message": "Missing current_step", "node": "search_tool"},
-            error_count=state.get("error_count", 0) + 1,
-        )
-
-    action_input = current_step.get("action_input", {})
-    query = action_input.get("query", state.get("user_query", ""))
-
-    try:
-        search_tool = AsyncCortexSearchTool(session)
-        results = await search_tool.execute(query)
-
-        # Format as observation
-        observation = format_observation("search_knowledge", results)
-
-        logger.info(f"Search tool completed: {len(results)} results")
-        return ToolOutput(
-            tool_result=observation,
-            has_error=False,
-        )
-
-    except Exception as exc:
-        logger.error(f"Search tool error: {exc}", exc_info=True)
-        return ToolOutput(
-            tool_result=f"[Error] Knowledge base search failed: {exc}",
-            has_error=True,
-            last_error={"message": str(exc), "node": "search_tool"},
-            error_count=state.get("error_count", 0) + 1,
-        )
-
-
-async def observation_node(state: HealthcareReActState) -> ObservationOutput:
-    """Capture tool result and append to scratchpad.
-
-    This node closes the ReAct loop by recording the observation
-    and preparing for the next reasoning iteration.
-
-    Args:
-        state: Current state with tool_result and current_step.
-
-    Returns:
-        ObservationOutput with updated scratchpad.
-    """
-    current_step = state.get("current_step")
-    tool_result = state.get("tool_result", "")
-
-    if not current_step:
-        logger.warning("Observation node called without current_step")
-        return ObservationOutput(
-            scratchpad=state.get("scratchpad", []),
-            current_step=None,
-            tool_result=None,
-        )
-
-    # Complete the step with the observation
-    completed_step = ReActStep(
-        thought=current_step.get("thought", ""),
-        action=current_step.get("action", ""),
-        action_input=current_step.get("action_input", {}),
-        observation=tool_result,
-    )
-
-    # Append to scratchpad
-    updated_scratchpad = list(state.get("scratchpad", []))
-    updated_scratchpad.append(completed_step)
-
-    logger.info(f"Observation recorded, scratchpad now has {len(updated_scratchpad)} steps")
-
-    return ObservationOutput(
-        scratchpad=updated_scratchpad,
-        current_step=None,  # Clear for next iteration
-        tool_result=None,
-    )
-
-
-async def final_answer_node(state: HealthcareReActState) -> FinalAnswerOutput:
-    """Extract final answer and append completed turn to conversation history.
+async def model_node(state: HealthcareAgentState) -> ModelOutput:
+    """Call Cortex COMPLETE and return AIMessage.
 
     This node:
-    1. Extracts the final answer from the last reasoning step
-    2. Creates a ConversationTurn capturing the query and answer
-    3. Appends the turn to conversation_history for persistence via checkpointer
-
-    Args:
-        state: Current state with current_step containing FINAL_ANSWER.
-
-    Returns:
-        FinalAnswerOutput with the answer text and updated conversation_history.
+    1. Builds the prompt from conversation history and messages
+    2. Calls Cortex COMPLETE
+    3. Returns AIMessage (with tool_calls or final answer)
     """
-    current_step = state.get("current_step")
-
-    if not current_step:
-        return FinalAnswerOutput(
-            final_answer="I apologize, but I was unable to formulate a response.",
-            current_node="final_answer",
-            conversation_history=[],  # No turn to add
-        )
-
-    action_input = current_step.get("action_input", {})
-    answer = action_input.get("answer", "")
-
-    if not answer:
-        # IMPORTANT: Do NOT use raw "thought" - it contains internal reasoning, not a user-facing answer
-        # Instead, try to synthesize a response from observations in the scratchpad
-        answer = _synthesize_fallback_answer(state)
-
-    logger.info(f"Final answer generated: {len(answer)} chars")
-
-    # Extract tools used from scratchpad for context in history
-    scratchpad = state.get("scratchpad", [])
-    tools_used = [step.get("action") for step in scratchpad if step.get("action") and step.get("action") != "FINAL_ANSWER"]
-
-    # Create the completed conversation turn to persist
-    completed_turn = ConversationTurn(
-        user_query=state.get("user_query", ""),
-        member_id=state.get("member_id"),
-        final_answer=answer,
-        tools_used=tools_used,
-    )
-
-    return FinalAnswerOutput(
-        final_answer=answer,
-        current_node="final_answer",
-        # This uses the _append_turns reducer to accumulate turns
-        conversation_history=[completed_turn],
-    )
-
-
-async def error_handler_node(state: HealthcareReActState) -> ErrorHandlerOutput:
-    """Handle errors and decide whether to retry or fail.
-
-    Args:
-        state: Current state with error information.
-
-    Returns:
-        ErrorHandlerOutput with error status.
-    """
-    error_count = state.get("error_count", 0)
-    max_errors = 3
-
-    if error_count >= max_errors:
-        logger.warning(f"Max errors ({max_errors}) reached, ending execution")
-        return ErrorHandlerOutput(
-            has_error=True,
-            error_count=error_count,
-            last_error=state.get("last_error"),
-            current_node="error_handler",
-        )
-
-    # Allow retry
-    logger.info(f"Error {error_count}/{max_errors}, allowing retry")
-    return ErrorHandlerOutput(
-        has_error=False,
-        error_count=error_count,
-        current_node="error_handler",
-    )
-
-
-# =============================================================================
-# Routing Functions
-# =============================================================================
-
-
-def route_by_action(
-    state: HealthcareReActState,
-) -> Literal["analyst_tool", "search_tool", "final_answer", "error", "max_iterations"]:
-    """Route based on the reasoner's action decision.
-
-    Args:
-        state: Current state with current_step containing the action.
-
-    Returns:
-        Next node name to execute.
-    """
-    # Check max iterations first
-    iteration = state.get("iteration", 0)
+    iteration = state.get("iteration", 0) + 1
     max_iterations = state.get("max_iterations", 5)
 
-    if iteration >= max_iterations:
+    # Check iteration limit
+    if iteration > max_iterations:
         logger.warning(f"Max iterations ({max_iterations}) reached")
-        return "max_iterations"
+        return {
+            "messages": [AIMessage(content="I've reached my processing limit. Based on what I found, please try a more specific question.")],
+            "iteration": iteration,
+        }
 
-    # Check for errors
+    # Get conversation context
+    user_query = state.get("user_query", "")
+    member_id = state.get("member_id")
+    conversation_history = state.get("conversation_history", [])
+    messages = state.get("messages", [])
+
+    # Build member context string
+    member_context = f"Current member ID: {member_id}" if member_id else "No specific member context"
+
+    # Build prompt with full context
+    prompt = build_react_prompt(
+        user_query=user_query,
+        member_id=member_id,
+        conversation_history=conversation_history,
+        scratchpad=_messages_to_scratchpad(messages),
+        member_context=member_context,
+    )
+
+    # Get model from settings
+    model = getattr(settings, "cortex_llm_model", "llama3.1-70b")
+
+    # Call Cortex COMPLETE
+    ai_message = await call_cortex_complete(prompt, model)
+
+    logger.info(f"ReAct iteration {iteration}: tool_calls={bool(ai_message.tool_calls)}")
+
+    return {
+        "messages": [ai_message],
+        "iteration": iteration,
+    }
+
+
+def _messages_to_scratchpad(messages: list) -> list[dict]:
+    """Convert messages to scratchpad format for prompt building.
+
+    Extracts thought/action/observation from message sequence.
+    """
+    scratchpad = []
+    i = 0
+
+    while i < len(messages):
+        msg = messages[i]
+
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            # AI decided to call a tool
+            tool_call = msg.tool_calls[0]
+            step = {
+                "thought": msg.content,  # Thought stored in content
+                "action": tool_call["name"],
+                "action_input": tool_call["args"],
+                "observation": "",
+            }
+
+            # Look for corresponding ToolMessage
+            if i + 1 < len(messages) and isinstance(messages[i + 1], ToolMessage):
+                step["observation"] = messages[i + 1].content
+                i += 1
+
+            scratchpad.append(step)
+
+        i += 1
+
+    return scratchpad
+
+
+async def final_answer_node(state: HealthcareAgentState) -> FinalAnswerOutput:
+    """Extract final answer and save to conversation history."""
+    messages = state.get("messages", [])
+    user_query = state.get("user_query", "")
+    member_id = state.get("member_id")
+
+    # Get final answer from last AIMessage and collect all tools used
+    final_answer = "I could not find an answer to your question."
+    tools_used = []
+
+    # First pass: collect all tools from messages (in order)
+    for msg in messages:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tools_used.append(tc["name"])
+
+    # Second pass: get final answer from last non-tool AIMessage
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and not msg.tool_calls and msg.content:
+            final_answer = msg.content
+            break
+
+    # Build conversation turn for history
+    turn = ConversationTurn(
+        user_query=user_query,
+        member_id=member_id,
+        final_answer=final_answer,
+        tools_used=list(reversed(tools_used)),  # Chronological order
+    )
+
+    logger.info(f"Final answer: {len(final_answer)} chars, tools: {tools_used}")
+
+    return {
+        "final_answer": final_answer,
+        "conversation_history": [turn],
+    }
+
+
+async def error_handler_node(state: HealthcareAgentState) -> ErrorHandlerOutput:
+    """Handle errors during graph execution."""
+    error_count = state.get("error_count", 0) + 1
+    last_error = state.get("last_error")
+
+    logger.error(f"Error handler invoked (count: {error_count}): {last_error}")
+
+    if error_count >= 3:
+        # Too many errors, generate error response
+        error_message = AIMessage(content="I apologize, but I encountered repeated errors. Please try again or rephrase your question.")
+        return {
+            "messages": [error_message],
+            "has_error": False,  # Clear error to allow final_answer
+            "error_count": error_count,
+        }
+
+    return {
+        "has_error": True,
+        "error_count": error_count,
+    }
+
+
+# =============================================================================
+# Routing Logic
+# =============================================================================
+
+
+def route_after_model(state: HealthcareAgentState) -> Literal["tools", "final_answer", "error"]:
+    """Route based on model output.
+
+    - If AIMessage has tool_calls → route to tools
+    - If AIMessage has content only → route to final_answer
+    - If error → route to error_handler
+    """
     if state.get("has_error"):
         return "error"
 
-    current_step = state.get("current_step")
-    if not current_step:
-        logger.error("No current_step in state")
+    messages = state.get("messages", [])
+    if not messages:
         return "error"
 
-    action = current_step.get("action", "").lower()
+    last_message = messages[-1]
 
-    # Map actions to nodes
-    if action == "query_member_data":
-        return "analyst_tool"
-    elif action == "search_knowledge":
-        return "search_tool"
-    elif action == "final_answer":
-        return "final_answer"
-    else:
-        logger.warning(f"Unknown action: {action}, defaulting to final_answer")
-        return "final_answer"
+    # Check if it's an AIMessage with tool_calls
+    if isinstance(last_message, AIMessage):
+        if last_message.tool_calls:
+            logger.info(f"Routing to tools: {last_message.tool_calls[0]['name']}")
+            return "tools"
+        else:
+            logger.info("Routing to final_answer")
+            return "final_answer"
+
+    # Unexpected message type
+    logger.warning(f"Unexpected message type: {type(last_message)}")
+    return "error"
 
 
-def route_after_error(
-    state: HealthcareReActState,
-) -> Literal["reasoner", "end"]:
-    """Route after error handling.
-
-    Args:
-        state: Current state with error information.
-
-    Returns:
-        Next node: retry (reasoner) or end.
-    """
+def route_after_error(state: HealthcareAgentState) -> Literal["model", "final_answer"]:
+    """Route after error handling."""
     error_count = state.get("error_count", 0)
-    max_errors = 3
 
-    if error_count >= max_errors:
-        return "end"
+    if error_count >= 3:
+        return "final_answer"
 
-    # Retry
-    return "reasoner"
+    return "model"
 
 
 # =============================================================================
-# Graph Builder
+# Graph Construction
 # =============================================================================
 
 
 def build_react_graph() -> StateGraph:
-    """Build the ReAct workflow graph.
+    """Build the modern ReAct graph with ToolNode.
 
-    Returns:
-        Compiled StateGraph with ReAct loop structure.
+    Graph structure:
+        START → model → [tools → model] (loop) → final_answer → END
+
+    The loop continues until model returns AIMessage without tool_calls.
     """
-    graph = StateGraph(HealthcareReActState)
+    graph = StateGraph(HealthcareAgentState)
 
     # Add nodes
-    graph.add_node("reasoner", reasoner_node)
-    graph.add_node("analyst_tool", analyst_tool_node)
-    graph.add_node("search_tool", search_tool_node)
-    graph.add_node("observation", observation_node)
+    graph.add_node("model", model_node)
+    graph.add_node("tools", TOOL_NODE)  # ToolNode handles tool execution
     graph.add_node("final_answer", final_answer_node)
     graph.add_node("error_handler", error_handler_node)
 
-    # Entry point
-    graph.set_entry_point("reasoner")
+    # Set entry point
+    graph.set_entry_point("model")
 
-    # Routing from reasoner based on action
+    # Add edges
     graph.add_conditional_edges(
-        "reasoner",
-        route_by_action,
+        "model",
+        route_after_model,
         {
-            "analyst_tool": "analyst_tool",
-            "search_tool": "search_tool",
+            "tools": "tools",
             "final_answer": "final_answer",
             "error": "error_handler",
-            "max_iterations": "final_answer",  # Force final answer on max iterations
         },
     )
 
-    # Tools feed to observation (the ReAct loop!)
-    graph.add_edge("analyst_tool", "observation")
-    graph.add_edge("search_tool", "observation")
-
-    # Observation loops back to reasoner
-    graph.add_edge("observation", "reasoner")
+    # Tools loop back to model (the ReAct loop!)
+    graph.add_edge("tools", "model")
 
     # Final answer ends the graph
     graph.add_edge("final_answer", END)
@@ -618,8 +429,8 @@ def build_react_graph() -> StateGraph:
         "error_handler",
         route_after_error,
         {
-            "reasoner": "reasoner",
-            "end": "final_answer",
+            "model": "model",
+            "final_answer": "final_answer",
         },
     )
 
@@ -647,18 +458,18 @@ def compile_react_graph(checkpointer=None):
 
 
 # =============================================================================
-# Convenience function for AgentService compatibility
+# Initial State Builder
 # =============================================================================
 
 
-def build_initial_react_state(
+def build_initial_state(
     user_query: str,
     member_id: str | None = None,
     tenant_id: str = "default",
     execution_id: str = "",
     max_iterations: int = 5,
-) -> HealthcareReActState:
-    """Build initial state for ReAct workflow execution.
+) -> HealthcareAgentState:
+    """Build initial state for graph execution.
 
     Args:
         user_query: The user's question.
@@ -668,21 +479,18 @@ def build_initial_react_state(
         max_iterations: Maximum ReAct iterations (default: 5).
 
     Returns:
-        Initial HealthcareReActState ready for graph.ainvoke().
+        Initial HealthcareAgentState ready for graph.ainvoke().
     """
-    return HealthcareReActState(
+    return HealthcareAgentState(
+        messages=[HumanMessage(content=user_query.strip())],
         user_query=user_query.strip(),
         member_id=member_id,
         tenant_id=tenant_id,
-        scratchpad=[],
-        current_step=None,
+        conversation_history=[],
         iteration=0,
         max_iterations=max_iterations,
-        tool_result=None,
+        execution_id=execution_id or f"exec_{uuid.uuid4().hex[:8]}",
         final_answer=None,
-        execution_id=execution_id,
-        thread_checkpoint_id=None,
-        current_node="start",
         error_count=0,
         last_error=None,
         has_error=False,
@@ -753,6 +561,7 @@ def _initialize_snowpark_session() -> None:
 
     try:
         _snowpark_session = Session.builder.configs(connection_params).create()
+        set_snowpark_session(_snowpark_session)
         logger.info("Snowpark session initialized successfully for ReAct workflow")
     except Exception as exc:
         logger.error(f"Failed to initialize Snowpark session: {exc}")
@@ -763,6 +572,4 @@ def _initialize_snowpark_session() -> None:
 _initialize_snowpark_session()
 
 # Export compiled graph for langgraph.json
-# Note: LangGraph API handles persistence automatically, so we compile WITHOUT checkpointer
-# The checkpointer is only added when deployed to SPCS via dependencies.py
 react_healthcare_graph = build_react_graph().compile()

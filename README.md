@@ -2,7 +2,7 @@
 
 An AI-powered healthcare contact center assistant built with **ReAct (Reasoning + Acting)** pattern using LangGraph on Snowflake.
 
-**Current Version:** v1.0.39 | **Architecture:** ReAct Pattern with Cortex Analyst & Search
+**Current Version:** v1.0.45 | **Architecture:** ReAct Pattern with Cortex Analyst & Search
 
 ---
 
@@ -44,7 +44,7 @@ flowchart TD
         ServiceFunction["HEALTHCARE_AGENT_QUERY Function"]
     end
 
-    subgraph spcs["SPCS Container - v1.0.39"]
+    subgraph spcs["SPCS Container - v1.0.45"]
         FastAPI["FastAPI + uvicorn"]
         ReactService["ReActAgentService"]
         
@@ -203,8 +203,10 @@ healthcare/
 │   │   ├── requests.py                  # QueryRequest (member_id validation)
 │   │   ├── responses.py                 # AgentResponse, StreamEvent
 │   │   └── agent_types.py               # AnalystResultModel, SearchResultModel
+│   ├── tools/
+│   │   └── healthcare_tools.py          # @tool decorated functions (query_member_data, search_knowledge)
 │   └── services/
-│       ├── react_agent_service.py       # ReActAgentService.execute(), .stream()
+│       ├── react_agent_service.py       # AgentService.execute(), .stream()
 │       ├── cortex_tools.py              # AsyncCortexAnalystTool, AsyncCortexSearchTool
 │       ├── cortex_analyst_client.py     # Async REST client for Cortex Analyst API
 │       └── snowflake_checkpointer.py    # SQLAlchemy-based LangGraph checkpointer
@@ -216,7 +218,7 @@ healthcare/
 │   │   ├── 03_load_data.sql             # Data loading
 │   │   ├── 04_cortex_services.sql       # Cortex Search services
 │   │   ├── 05_compute_resources.sql     # Compute pool, warehouse
-│   │   ├── 08_spcs_deploy.sql           # SPCS deployment (v1.0.39)
+│   │   ├── 08_spcs_deploy.sql           # SPCS deployment (v1.0.45)
 │   │   ├── 09_semantic_model.sql        # Semantic model stage/upload
 │   │   └── semantic_models/
 │   │       └── healthcare_semantic_model.yaml  # Cortex Analyst NL→SQL model
@@ -246,7 +248,10 @@ healthcare/
 |---------|-------------|
 | **ReAct Pattern** | Think → Act → Observe loop with LLM reasoning |
 | **Semantic Model** | NL→SQL via Cortex Analyst REST API with verified queries |
+| **Structured Output** | Cortex COMPLETE returns JSON with thought/action/action_input |
+| **Full Personal Info** | Extracts all member fields (name, DOB, smoker, lifestyle, chronic condition) |
 | **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
+| **Tool Tracking** | Records all tools used per conversation turn |
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
 | **SPCS OAuth** | Automatic authentication via `/snowflake/session/token` |
 | **Streaming** | SSE endpoint for real-time agent execution updates |
@@ -323,13 +328,13 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 
 ```bash
 # Build Docker image for linux/amd64
-docker build --platform linux/amd64 -t healthcare-agent:v1.0.39 .
+docker build --platform linux/amd64 -t healthcare-agent:v1.0.45 .
 
 # Tag and push to Snowflake registry
 REGISTRY="your-account.registry.snowflakecomputing.com"
-docker tag healthcare-agent:v1.0.39 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.39
+docker tag healthcare-agent:v1.0.45 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.45
 snow spcs image-registry login -c jwt
-docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.39
+docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.45
 
 # Deploy service
 snow sql -c jwt --filename scripts/sql/08_spcs_deploy.sql

@@ -93,21 +93,25 @@ def _parse_search_result(result_data: str | dict, source: str, limit: int) -> li
                     text_parts.append(f"{key}: {val}")
             text = " | ".join(text_parts)[:5000]
 
-            parsed_results.append({
-                "text": text,
-                "score": item.get("@search_score", 0.9),
-                "source": source.lower().replace("_search", ""),
-                "metadata": item.get("@scores", {}),
-            })
+            parsed_results.append(
+                {
+                    "text": text,
+                    "score": item.get("@search_score", 0.9),
+                    "source": source.lower().replace("_search", ""),
+                    "metadata": item.get("@scores", {}),
+                }
+            )
 
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning(f"Failed to parse search result: {e}")
-        parsed_results.append({
-            "text": str(result_data)[:5000],
-            "score": 0.9,
-            "source": source.lower().replace("_search", ""),
-            "metadata": {},
-        })
+        parsed_results.append(
+            {
+                "text": str(result_data)[:5000],
+                "score": 0.9,
+                "source": source.lower().replace("_search", ""),
+                "metadata": {},
+            }
+        )
 
     return parsed_results
 
@@ -144,6 +148,7 @@ class AsyncCortexAnalystTool:
         """
         if self._analyst_client is None:
             from src.services.cortex_analyst_client import AsyncCortexAnalystClient
+
             self._analyst_client = AsyncCortexAnalystClient(
                 session=self.session,
                 database=settings.snowflake_database,
@@ -176,9 +181,7 @@ class AsyncCortexAnalystTool:
                 return await self._execute_via_snowpark(query, member_id)
             raise
 
-    async def _execute_via_cortex_analyst_api(
-        self, query: str, member_id: str | None = None
-    ) -> dict[str, Any]:
+    async def _execute_via_cortex_analyst_api(self, query: str, member_id: str | None = None) -> dict[str, Any]:
         """Execute query using Cortex Analyst REST API with semantic model.
 
         Args:
@@ -242,9 +245,7 @@ class AsyncCortexAnalystTool:
 
         return result
 
-    async def _execute_via_snowpark(
-        self, query: str, member_id: str | None = None
-    ) -> dict[str, Any]:
+    async def _execute_via_snowpark(self, query: str, member_id: str | None = None) -> dict[str, Any]:
         """Execute query using direct Snowpark SQL (local fallback).
 
         Uses the denormalized member table for comprehensive data access.
@@ -387,10 +388,7 @@ class AsyncCortexAnalystTool:
             """
             result = self.session.sql(sql).collect()
             if result:
-                members = [
-                    {"MEMBER_ID": row[0], "MEMBER_NAME": row[1], "PREMIUM": str(row[2])}
-                    for row in result
-                ]
+                members = [{"MEMBER_ID": row[0], "MEMBER_NAME": row[1], "PREMIUM": str(row[2])} for row in result]
                 return {"query_type": "general", "data": members}
 
         # Top N members by claims (highest/most)
@@ -406,10 +404,7 @@ class AsyncCortexAnalystTool:
             """
             result = self.session.sql(sql).collect()
             if result:
-                members = [
-                    {"MEMBER_ID": row[0], "MEMBER_NAME": row[1], "TOTAL_PAID": str(row[2])}
-                    for row in result
-                ]
+                members = [{"MEMBER_ID": row[0], "MEMBER_NAME": row[1], "TOTAL_PAID": str(row[2])} for row in result]
                 return {"query_type": "general", "data": members}
 
         # Member names list
@@ -517,14 +512,18 @@ class AsyncCortexAnalystTool:
                     return first_row[k]
             return default
 
+        # Log available columns for debugging
+        logger.info(f"Available columns in result: {list(first_row.keys())}")
+
+        # Extract with all possible column name variations (raw DB, semantic model names)
         result["member_info"] = {
-            "NAME": get_val("NAME", "name", "member_name"),
-            "DOB": str(get_val("DOB", "dob", "date_of_birth", default="")),
+            "NAME": get_val("NAME", "name", "member_name", "MEMBER_NAME"),
+            "DOB": str(get_val("DOB", "dob", "date_of_birth", "DATE_OF_BIRTH", default="")),
             "GENDER": get_val("GENDER", "gender"),
             "ADDRESS": get_val("ADDRESS", "address"),
-            "PHONE": get_val("MEMBER_PHONE", "member_phone", "phone"),
-            "SMOKER": get_val("SMOKER_IND", "smoker_indicator"),
-            "LIFESTYLE": get_val("LIFESTYLE_INFO", "lifestyle_info"),
+            "PHONE": get_val("MEMBER_PHONE", "member_phone", "phone", "PHONE"),
+            "SMOKER": get_val("SMOKER_IND", "smoker_indicator", "SMOKER_INDICATOR"),
+            "LIFESTYLE": get_val("LIFESTYLE_INFO", "lifestyle_info", "LIFESTYLE_INFO"),
             "CHRONIC_CONDITION": get_val("CHRONIC_CONDITION", "chronic_condition"),
             "PCP": get_val("PCP", "pcp"),
             "PCP_PHONE": get_val("PCP_PHONE", "pcp_phone"),
@@ -568,13 +567,15 @@ class AsyncCortexAnalystTool:
             service = row.get("CLAIM_SERVICE") or row.get("service_type") or row.get("SERVICE_TYPE")
             bill_amt = row.get("AMOUNT") or row.get("amount") or row.get("CLAIM_BILL_AMT")
             status = row.get("STATUS") or row.get("status") or row.get("CLAIM_STATUS")
-            claims.append({
-                "CLAIM_ID": row.get("CLAIM_ID", row.get("claim_id")),
-                "CLAIM_SERVICE": service,
-                "CLAIM_SERVICE_FROM_DATE": str(row.get("CLAIM_DATE", row.get("claim_date", ""))),
-                "CLAIM_BILL_AMT": bill_amt,
-                "CLAIM_STATUS": status,
-            })
+            claims.append(
+                {
+                    "CLAIM_ID": row.get("CLAIM_ID", row.get("claim_id")),
+                    "CLAIM_SERVICE": service,
+                    "CLAIM_SERVICE_FROM_DATE": str(row.get("CLAIM_DATE", row.get("claim_date", ""))),
+                    "CLAIM_BILL_AMT": bill_amt,
+                    "CLAIM_STATUS": status,
+                }
+            )
         return claims
 
     def _format_aggregate(self, rows: list[dict]) -> dict:
@@ -694,10 +695,7 @@ class AsyncCortexSearchTool:
 
         try:
             async with asyncio.TaskGroup() as tg:
-                tasks = [
-                    tg.create_task(self._search_source_async(source, query, limit))
-                    for source in sources
-                ]
+                tasks = [tg.create_task(self._search_source_async(source, query, limit)) for source in sources]
 
             for task in tasks:
                 all_results.extend(task.result())

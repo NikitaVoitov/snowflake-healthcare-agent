@@ -561,6 +561,20 @@ verified_queries:
     sql: |
       SELECT DISTINCT
         member_id, member_name, date_of_birth, gender, address, member_phone,
+        smoker_indicator, lifestyle_info, chronic_condition,
+        plan_id, plan_name, plan_type, premium,
+        pcp, pcp_phone, coverage_start_date, coverage_end_date
+      FROM __members
+      WHERE member_id = '470154690'
+
+  - name: member_personal_info
+    question: What is all personal info for member 470154690
+    verified_at: 1734739200
+    verified_by: system
+    sql: |
+      SELECT DISTINCT
+        member_id, member_name, date_of_birth, gender, address, member_phone,
+        smoker_indicator, lifestyle_info, chronic_condition,
         plan_id, plan_name, plan_type, premium,
         pcp, pcp_phone, coverage_start_date, coverage_end_date
       FROM __members
