@@ -1,6 +1,9 @@
 -- =============================================================================
--- Healthcare Multi-Agent Lab - Streamlit App Deployment
--- Phase 8: Deploy Native Streamlit App to Snowsight
+-- Healthcare ReAct Agent - Streamlit App Deployment
+-- Deploy Native Streamlit App to Snowsight
+-- 
+-- The app uses the service function STAGING.HEALTHCARE_AGENT_QUERY() to
+-- communicate with the SPCS ReAct agent container. No external access needed.
 -- =============================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -31,7 +34,7 @@ CREATE OR REPLACE STREAMLIT STAGING.HEALTHCARE_ASSISTANT
     ROOT_LOCATION = '@HEALTHCARE_DB.STAGING.STREAMLIT_APPS'
     MAIN_FILE = 'app.py'
     QUERY_WAREHOUSE = 'PAYERS_CC_WH'
-    COMMENT = 'Healthcare Contact Center Multi-Agent Assistant';
+    COMMENT = 'Healthcare Contact Center ReAct Agent Assistant v1.0.47';
 
 -- -----------------------------------------------------------------------------
 -- Step 4: Grant Access

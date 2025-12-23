@@ -49,12 +49,12 @@ CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 300
-    COMMENT = 'Healthcare Multi-Agent FastAPI Service v1.0.40 (Structured Output)'
+    COMMENT = 'Healthcare ReAct Agent FastAPI Service v1.0.47'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.45
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.47
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
@@ -124,12 +124,12 @@ DROP FUNCTION IF EXISTS STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR
 CREATE OR REPLACE FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(
     query VARCHAR,
     member_id VARCHAR DEFAULT NULL,
-    tenant_id VARCHAR DEFAULT 'default'
+    execution_id VARCHAR DEFAULT 'default'
 )
 RETURNS VARIANT
 SERVICE = STAGING.HEALTHCARE_AGENTS_SERVICE
 ENDPOINT = 'query-api'
-AS '/agents/query';
+AS '/agents/sf-query';
 
 -- Grant execute on the function
 GRANT USAGE ON FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR) TO ROLE PUBLIC;
