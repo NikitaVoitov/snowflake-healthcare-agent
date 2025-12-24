@@ -39,6 +39,12 @@ COPY --from=builder /app/.venv /app/.venv
 # Copy application source code
 COPY src/ ./src/
 
+# PATCH: Apply fixes for langchain-snowflake SPCS compatibility
+# 1. rest_client.py: Fix _get_base_url() to use SNOWFLAKE_HOST env var (required for SPCS OAuth)
+# 2. tools.py: Fix _parse_json_response() to avoid content duplication (issue #35)
+COPY patches/langchain_snowflake_rest_client_patched.py /app/.venv/lib/python3.11/site-packages/langchain_snowflake/_connection/rest_client.py
+COPY patches/langchain_snowflake_tools_patched.py /app/.venv/lib/python3.11/site-packages/langchain_snowflake/chat_models/tools.py
+
 # Set ownership to non-root user
 RUN chown -R appuser:appuser /app
 

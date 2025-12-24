@@ -49,8 +49,8 @@ class Settings(BaseSettings):
     max_agent_steps: int = 3
     agent_timeout_seconds: float = 30.0
 
-    # Cortex settings
-    cortex_llm_model: str = "llama3.1-70b"
+    # Cortex settings - claude-3-5-sonnet supports tool calling
+    cortex_llm_model: str = "claude-3-5-sonnet"
     cortex_search_limit: int = 5
 
     # LangChain tracing (optional)

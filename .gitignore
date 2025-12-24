@@ -134,3 +134,7 @@ TODO.md
 
 # Local implementation plan (not for repo)
 impl_plan_final.md
+TODO*.md
+original_langchain_snwoflake_repo/
+notebooks/
+

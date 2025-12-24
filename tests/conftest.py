@@ -176,6 +176,44 @@ def sample_agent_response() -> AgentResponse:
     )
 
 
+# --- Mock ChatSnowflake ---
+
+
+@pytest.fixture
+def mock_chat_snowflake() -> AsyncMock:
+    """Mock ChatSnowflake for testing without Snowflake connection."""
+    mock = AsyncMock()
+
+    # Default response without tool calls
+    mock.ainvoke.return_value = AIMessage(content="This is a test response from ChatSnowflake.")
+
+    # Mock bind_tools to return self
+    mock.bind_tools.return_value = mock
+
+    return mock
+
+
+@pytest.fixture
+def mock_chat_snowflake_with_tools() -> AsyncMock:
+    """Mock ChatSnowflake that returns tool calls."""
+    mock = AsyncMock()
+
+    mock.ainvoke.return_value = AIMessage(
+        content="I need to query the database.",
+        tool_calls=[
+            {
+                "id": "call_test123",
+                "name": "query_member_data",
+                "args": {"query": "member benefits", "member_id": "106742775"},
+            }
+        ],
+    )
+
+    mock.bind_tools.return_value = mock
+
+    return mock
+
+
 # --- Mock Cortex Tools ---
 
 

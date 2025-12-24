@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.47 (Dec 2024) - Enhanced claim formatting with amounts
+-- Current version: v1.0.49 (Dec 2024) - ChatSnowflake uses pre-created session in SPCS
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
@@ -13,6 +13,9 @@
 --   5. Container name is healthcare-agent (singular), not healthcare-agents
 --   6. Module-level Snowpark session (not ContextVar) for async propagation
 --   7. USE_REACT_WORKFLOW=true enables ReAct reasoning loop with conversation memory
+--   8. ChatSnowflake from langchain-snowflake for native Cortex integration
+--   9. claude-3-5-sonnet model required for tool calling support
+--  10. Fully async architecture - no blocking calls in event loop
 -- =============================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -42,19 +45,19 @@ DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
 -- -----------------------------------------------------------------------------
 -- Step 4: Create the SPCS Service
 -- -----------------------------------------------------------------------------
--- WORKING version - Cortex Analyst with Semantic Model (v1.0.34)
+-- WORKING version - ChatSnowflake uses pre-created session (v1.0.49)
 CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     IN COMPUTE POOL AGENTS_POOL
     EXTERNAL_ACCESS_INTEGRATIONS = (HEALTHCARE_EXTERNAL_ACCESS)
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
-    AUTO_SUSPEND_SECS = 300
-    COMMENT = 'Healthcare ReAct Agent FastAPI Service v1.0.47'
+    AUTO_SUSPEND_SECS = 0
+    COMMENT = 'Healthcare ReAct Agent v1.0.68 - Uses SPCSCortexChat (langchain-snowflake has SPCS bugs: auth format + empty response parsing + content duplication)'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.47
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.68
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
@@ -62,8 +65,8 @@ spec:
         # Agent configuration
         MAX_AGENT_STEPS: "5"
         AGENT_TIMEOUT_SECONDS: "60"
-        # Cortex LLM for response synthesis
-        CORTEX_LLM_MODEL: "llama3.1-70b"
+        # Cortex LLM - claude-3-5-sonnet for tool calling support
+        CORTEX_LLM_MODEL: "claude-3-5-sonnet"
         # Enable ReAct workflow (Reasoning + Acting with conversation memory)
         USE_REACT_WORKFLOW: "true"
       resources:
@@ -139,7 +142,7 @@ GRANT USAGE ON FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR
 -- -----------------------------------------------------------------------------
 /*
 # VERSION: Update this for each deployment
-export VERSION=v1.0.31
+export VERSION=v1.0.68
 export REGISTRY=cisco-splunkincubation.registry.snowflakecomputing.com
 
 # 1. Build for linux/amd64 (required for SPCS)

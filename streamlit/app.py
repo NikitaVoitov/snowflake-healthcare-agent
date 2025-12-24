@@ -6,8 +6,9 @@ the Healthcare ReAct Agent running in SPCS.
 
 import json
 
-import streamlit as st
 from snowflake.snowpark.context import get_active_session
+
+import streamlit as st
 
 # =============================================================================
 # Page Configuration
@@ -77,9 +78,7 @@ if "execution_id" not in st.session_state:
 def check_service_status() -> dict:
     """Check if the SPCS service is running."""
     try:
-        result = session.sql(
-            "CALL SYSTEM$GET_SERVICE_STATUS('HEALTHCARE_DB.STAGING.HEALTHCARE_AGENTS_SERVICE')"
-        ).collect()
+        result = session.sql("CALL SYSTEM$GET_SERVICE_STATUS('HEALTHCARE_DB.STAGING.HEALTHCARE_AGENTS_SERVICE')").collect()
         if result:
             status_json = json.loads(result[0][0])
             if status_json and len(status_json) > 0:
@@ -109,14 +108,14 @@ with st.sidebar:
     service_info = check_service_status()
     if service_info["status"] == "READY":
         st.markdown(
-            f'<div class="service-status status-ready">✅ Service Ready</div>',
+            '<div class="service-status status-ready">✅ Service Ready</div>',
             unsafe_allow_html=True,
         )
         if service_info["image"]:
             st.caption(f"Version: {service_info['image']}")
     elif service_info["status"] == "ERROR":
         st.markdown(
-            f'<div class="service-status status-error">❌ Service Error</div>',
+            '<div class="service-status status-error">❌ Service Error</div>',
             unsafe_allow_html=True,
         )
         st.caption(service_info["message"][:100])
@@ -239,12 +238,13 @@ def call_agent_service(query: str, member_id: str | None, execution_id: str | No
         # Build execution_id for conversation continuity
         if not execution_id:
             import time
+
             execution_id = f"streamlit_{int(time.time())}"
-        
+
         # Escape single quotes in query
         safe_query = query.replace("'", "''")
         safe_member_id = (member_id or "").replace("'", "''")
-        
+
         # Call the service function
         sql = f"""
             SELECT HEALTHCARE_DB.STAGING.HEALTHCARE_AGENT_QUERY(
@@ -253,15 +253,15 @@ def call_agent_service(query: str, member_id: str | None, execution_id: str | No
                 '{execution_id}'
             ) AS result
         """
-        
+
         result = session.sql(sql).collect()
-        
+
         if result and result[0][0]:
             response = result[0][0]
             # Handle both dict and JSON string
             if isinstance(response, str):
                 response = json.loads(response)
-            
+
             return {
                 "output": response.get("output", "No response"),
                 "routing": response.get("routing", ""),
@@ -270,9 +270,9 @@ def call_agent_service(query: str, member_id: str | None, execution_id: str | No
                 "analystResults": response.get("analystResults"),
                 "searchResults": response.get("searchResults"),
             }
-        
+
         return {"output": "No response from service", "error": True}
-        
+
     except Exception as e:
         error_msg = str(e)
         if "does not exist" in error_msg:
@@ -292,9 +292,7 @@ if prompt := st.chat_input("Ask about your healthcare coverage..."):
 
     # Call agent service
     with st.chat_message("assistant"), st.spinner("🤔 Thinking..."):
-        result = call_agent_service(
-            prompt, st.session_state.member_id, st.session_state.execution_id
-        )
+        result = call_agent_service(prompt, st.session_state.member_id, st.session_state.execution_id)
 
         # Store execution_id for conversation continuity
         if result.get("executionId"):
@@ -334,7 +332,4 @@ if prompt := st.chat_input("Ask about your healthcare coverage..."):
 # Footer
 # =============================================================================
 st.markdown("---")
-st.caption(
-    "Powered by Snowflake Cortex AI • LangGraph ReAct Agent • "
-    "Built with ❄️ Streamlit in Snowflake"
-)
+st.caption("Powered by Snowflake Cortex AI • LangGraph ReAct Agent • Built with ❄️ Streamlit in Snowflake")

@@ -33,12 +33,14 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     logger.info(f"Snowflake account: {settings.snowflake_account}")
     logger.info(f"Database: {settings.snowflake_database}")
 
-    # Initialize Snowpark session for Cortex tools
+    # Initialize Snowpark session for Cortex tools AND ChatSnowflake
     from src.graphs.react_workflow import set_snowpark_session
+    from src.services.llm_service import set_session as set_llm_session
 
     try:
         snowpark_session = _create_snowpark_session()
         set_snowpark_session(snowpark_session)
+        set_llm_session(snowpark_session)  # Share session with ChatSnowflake
         logger.info("Snowpark session initialized for Cortex tools")
     except Exception as e:
         logger.warning(f"Snowpark session init failed (tools will use mocks): {e}")
@@ -85,14 +87,16 @@ def _create_snowpark_session():
             raise ValueError("SNOWFLAKE_HOST not set in SPCS")
 
         logger.info("Creating Snowpark session with SPCS OAuth token")
-        return Session.builder.configs({
-            "account": host.replace(".snowflakecomputing.com", ""),
-            "host": host,
-            "authenticator": "oauth",
-            "token": token,
-            "database": settings.snowflake_database,
-            "warehouse": settings.snowflake_warehouse,
-        }).create()
+        return Session.builder.configs(
+            {
+                "account": host.replace(".snowflakecomputing.com", ""),
+                "host": host,
+                "authenticator": "oauth",
+                "token": token,
+                "database": settings.snowflake_database,
+                "warehouse": settings.snowflake_warehouse,
+            }
+        ).create()
     else:
         # Local uses key-pair auth
         from cryptography.hazmat.backends import default_backend
@@ -104,8 +108,7 @@ def _create_snowpark_session():
         with open(settings.snowflake_private_key_path, "rb") as f:
             private_key = serialization.load_pem_private_key(
                 f.read(),
-                password=(settings.snowflake_private_key_passphrase.encode()
-                          if settings.snowflake_private_key_passphrase else None),
+                password=(settings.snowflake_private_key_passphrase.encode() if settings.snowflake_private_key_passphrase else None),
                 backend=default_backend(),
             )
 
@@ -116,13 +119,15 @@ def _create_snowpark_session():
         )
 
         logger.info("Creating Snowpark session with key-pair auth")
-        return Session.builder.configs({
-            "account": settings.snowflake_account,
-            "user": settings.snowflake_user,
-            "private_key": private_key_bytes,
-            "database": settings.snowflake_database,
-            "warehouse": settings.snowflake_warehouse,
-        }).create()
+        return Session.builder.configs(
+            {
+                "account": settings.snowflake_account,
+                "user": settings.snowflake_user,
+                "private_key": private_key_bytes,
+                "database": settings.snowflake_database,
+                "warehouse": settings.snowflake_warehouse,
+            }
+        ).create()
 
 
 app = FastAPI(

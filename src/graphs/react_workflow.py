@@ -1,4 +1,4 @@
-"""Modern ReAct workflow using LangGraph message-based state and ToolNode.
+"""Modern ReAct workflow using LangGraph message-based state and ToolNode - FULLY ASYNC.
 
 Implements the Reasoning + Acting pattern with:
 - Message-based state (HumanMessage, AIMessage, ToolMessage)
@@ -6,22 +6,24 @@ Implements the Reasoning + Acting pattern with:
 - ToolNode for automatic tool execution
 - Tool calls routing via AIMessage.tool_calls
 
-Uses Snowflake Cortex COMPLETE with structured output, wrapped to return
-AIMessage objects with tool_calls for LangGraph compatibility.
+Uses ChatSnowflake from langchain-snowflake for native Cortex integration
+with automatic tool binding and async support.
+
+ALL blocking operations are wrapped in asyncio.to_thread() to avoid
+blocking the event loop.
 """
 
 import asyncio
 import logging
-import uuid
 from typing import Literal
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from src.config import settings
-from src.graphs.react_prompts import build_react_prompt
+from src.graphs.react_prompts import build_system_message
 from src.graphs.react_state import (
     ConversationTurn,
     ErrorHandlerOutput,
@@ -29,13 +31,16 @@ from src.graphs.react_state import (
     HealthcareAgentState,
     ModelOutput,
 )
+from src.services.llm_service import get_chat_snowflake
 from src.tools.healthcare_tools import get_healthcare_tools
 from src.tools.healthcare_tools import set_snowpark_session as set_tools_session
 
 logger = logging.getLogger(__name__)
 
-# Module-level session for SPCS OAuth token auth
+# Module-level session for SPCS OAuth token auth (used by tools)
 _snowpark_session = None
+_session_initialized = False
+_session_lock = asyncio.Lock()
 
 # Get tools for ToolNode
 HEALTHCARE_TOOLS = get_healthcare_tools()
@@ -49,144 +54,148 @@ def set_snowpark_session(session) -> None:
     """Set the Snowpark session for use by workflow nodes.
 
     In SPCS, this is called during app startup with the OAuth-authenticated session.
+    The session is used by tools (Cortex Analyst, Cortex Search) not by ChatSnowflake.
     """
-    global _snowpark_session
+    global _snowpark_session, _session_initialized
     _snowpark_session = session
+    _session_initialized = True
     # Also set session for tools module
     set_tools_session(session)
     logger.info("Snowpark session set for ReAct workflow")
 
 
-# =============================================================================
-# Cortex COMPLETE Wrapper - Returns AIMessage with tool_calls
-# =============================================================================
+async def _ensure_snowpark_session_async() -> None:
+    """Ensure Snowpark session is initialized (ASYNC with locking).
 
-
-# Response format schema for AI_COMPLETE structured output
-# Following Snowflake docs: https://docs.snowflake.com/en/user-guide/snowflake-cortex/complete-structured-outputs
-RESPONSE_FORMAT_SQL = """{
-    'type': 'json',
-    'schema': {
-        'type': 'object',
-        'properties': {
-            'thought': {'type': 'string'},
-            'action': {'type': 'string'},
-            'action_input': {
-                'type': 'object',
-                'properties': {
-                    'query': {'type': 'string'},
-                    'member_id': {'type': ['string', 'null']},
-                    'answer': {'type': 'string'}
-                },
-                'required': ['query']
-            }
-        },
-        'required': ['thought', 'action', 'action_input']
-    }
-}"""
-
-
-async def call_cortex_complete(prompt: str, model: str = "llama3.1-70b") -> AIMessage:
-    """Call Snowflake Cortex AI_COMPLETE with structured output and return AIMessage.
-
-    Uses SQL-based AI_COMPLETE with named parameters:
-    - model_parameters for temperature
-    - response_format for JSON schema
-
-    Args:
-        prompt: Full prompt including system message and conversation.
-        model: Cortex model to use.
-
-    Returns:
-        AIMessage with either tool_calls or content.
+    Initializes the session lazily on first use, avoiding blocking at module load.
     """
-    if _snowpark_session is None:
-        logger.error("No Snowpark session available")
-        return AIMessage(content="I apologize, but I cannot process your request at this time.")
+    global _snowpark_session, _session_initialized
 
-    # Escape single quotes for SQL string
-    escaped_prompt = prompt.replace("'", "''")
+    if _session_initialized:
+        return
 
-    # Build SQL with AI_COMPLETE using named parameters (per Snowflake docs)
-    sql = f"""
-    SELECT AI_COMPLETE(
-        model => '{model}',
-        prompt => '{escaped_prompt}',
-        model_parameters => {{'temperature': 0}},
-        response_format => {RESPONSE_FORMAT_SQL}
-    ) AS response
+    async with _session_lock:
+        # Double-check after acquiring lock
+        if _session_initialized:
+            return
+
+        logger.info("Lazy-initializing Snowpark session...")
+        await _initialize_snowpark_session_async()
+
+
+async def _initialize_snowpark_session_async() -> None:
+    """Initialize Snowpark session asynchronously.
+
+    Creates connection using either:
+    - SPCS OAuth token (when running in Snowpark Container Services)
+    - Local credentials (when running in development)
+
+    Note: This session is used by tools (Cortex Analyst, Cortex Search),
+    not by ChatSnowflake which manages its own connection.
     """
+    global _snowpark_session, _session_initialized
 
-    def _execute_sql():
-        """Execute SQL (blocking call)."""
-        return _snowpark_session.sql(sql).collect()
+    if _session_initialized:
+        return
+
+    if settings.is_spcs:
+        # SPCS mode - use OAuth token
+        import os
+        from pathlib import Path
+
+        logger.info("Initializing Snowpark session with SPCS OAuth token")
+        token_path = Path("/snowflake/session/token")
+
+        # Read token asynchronously
+        token = await asyncio.to_thread(token_path.read_text)
+
+        connection_params = {
+            "account": os.environ.get("SNOWFLAKE_ACCOUNT", ""),
+            "host": os.environ.get("SNOWFLAKE_HOST", ""),
+            "authenticator": "oauth",
+            "token": token,
+            "database": settings.snowflake_database,
+            "warehouse": settings.snowflake_warehouse,
+        }
+    else:
+        # Local mode - use key pair authentication
+        logger.info("Initializing Snowpark session with key pair authentication")
+        from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives import serialization
+
+        def _load_key_sync():
+            with open(settings.snowflake_private_key_path, "rb") as key_file:
+                private_key = serialization.load_pem_private_key(
+                    key_file.read(),
+                    password=settings.snowflake_private_key_passphrase.encode() if settings.snowflake_private_key_passphrase else None,
+                    backend=default_backend(),
+                )
+
+            return private_key.private_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+
+        # Load key asynchronously
+        private_key_bytes = await asyncio.to_thread(_load_key_sync)
+
+        connection_params = {
+            "account": settings.snowflake_account,
+            "user": settings.snowflake_user,
+            "private_key": private_key_bytes,
+            "database": settings.snowflake_database,
+            "warehouse": settings.snowflake_warehouse,
+            "role": settings.snowflake_role,
+        }
+
+    # Create session asynchronously (blocking network call)
+    def _create_session_sync(params):
+        from snowflake.snowpark import Session
+        return Session.builder.configs(params).create()
 
     try:
-        # Run blocking SQL in thread pool
-        result = await asyncio.to_thread(_execute_sql)
+        _snowpark_session = await asyncio.to_thread(_create_session_sync, connection_params)
+        set_snowpark_session(_snowpark_session)
+        _session_initialized = True
+        logger.info("Snowpark session initialized successfully for ReAct workflow")
+    except Exception as exc:
+        logger.error("Failed to initialize Snowpark session: %s", exc)
+        raise
 
-        if not result:
-            logger.error("Empty result from AI_COMPLETE")
-            return AIMessage(content="I couldn't process your request.")
 
-        # Get the response - AI_COMPLETE returns the result directly
-        response_text = result[0]["RESPONSE"]
-        logger.info(f"Raw LLM response type: {type(response_text)}, value: {str(response_text)[:300]}")
+# =============================================================================
+# Message Construction for ChatSnowflake
+# =============================================================================
 
-        # Parse the structured JSON response
-        import orjson
 
-        if response_text is None:
-            logger.error("AI_COMPLETE returned None")
-            return AIMessage(content="I couldn't generate a response.")
+def _build_chat_messages(state: HealthcareAgentState) -> list[BaseMessage]:
+    """Convert state to LangChain messages for ChatSnowflake.
 
-        # Handle both string and dict responses
-        if isinstance(response_text, str):
-            parsed = orjson.loads(response_text)
-        elif isinstance(response_text, dict):
-            parsed = response_text
-        else:
-            logger.error(f"Unexpected response type: {type(response_text)}")
-            return AIMessage(content="I encountered an unexpected response format.")
+    Builds a message list with:
+    1. System message containing healthcare context and tool guidance
+    2. Existing messages from state (HumanMessage, AIMessage, ToolMessage)
 
-        thought = parsed.get("thought", "")
-        action = parsed.get("action", "FINAL_ANSWER")
-        action_input = parsed.get("action_input", {})
+    Args:
+        state: Current graph state with messages and context.
 
-        logger.info(f"Cortex COMPLETE: action={action}, thought={thought[:50]}...")
+    Returns:
+        List of messages ready for ChatSnowflake.ainvoke().
+    """
+    messages: list[BaseMessage] = []
 
-        # Convert to AIMessage
-        if action == "FINAL_ANSWER":
-            # Final answer - return AIMessage with content
-            answer = action_input.get("answer", thought)
-            return AIMessage(content=answer)
+    # Build system message with context
+    system_content = build_system_message(
+        member_id=state.get("member_id"),
+        conversation_history=state.get("conversation_history", []),
+    )
+    messages.append(SystemMessage(content=system_content))
 
-        # Tool call - return AIMessage with tool_calls
-        tool_call_id = f"call_{uuid.uuid4().hex[:8]}"
+    # Add existing messages (HumanMessage, AIMessage with tool_calls, ToolMessage)
+    existing_messages = state.get("messages", [])
+    messages.extend(existing_messages)
 
-        # Build tool arguments based on tool schema
-        tool_args = {}
-        if action == "query_member_data":
-            tool_args["query"] = action_input.get("query", "")
-            if action_input.get("member_id"):
-                tool_args["member_id"] = action_input["member_id"]
-        elif action == "search_knowledge":
-            tool_args["query"] = action_input.get("query", "")
-
-        return AIMessage(
-            content=thought,  # Store thought in content for debugging
-            tool_calls=[
-                {
-                    "id": tool_call_id,
-                    "name": action,
-                    "args": tool_args,
-                }
-            ],
-        )
-
-    except Exception as e:
-        logger.error(f"Cortex COMPLETE failed: {e}")
-        return AIMessage(content=f"I encountered an error: {str(e)}")
+    return messages
 
 
 # =============================================================================
@@ -195,19 +204,24 @@ async def call_cortex_complete(prompt: str, model: str = "llama3.1-70b") -> AIMe
 
 
 async def model_node(state: HealthcareAgentState) -> ModelOutput:
-    """Call Cortex COMPLETE and return AIMessage.
+    """Call ChatSnowflake and return AIMessage (ASYNC).
 
     This node:
-    1. Builds the prompt from conversation history and messages
-    2. Calls Cortex COMPLETE
-    3. Returns AIMessage (with tool_calls or final answer)
+    1. Ensures Snowpark session is initialized (for tools)
+    2. Checks iteration limits
+    3. Builds messages from state
+    4. Calls ChatSnowflake with bound tools
+    5. Returns AIMessage (with tool_calls or final answer)
     """
+    # Ensure session is initialized (lazy initialization)
+    await _ensure_snowpark_session_async()
+
     iteration = state.get("iteration", 0) + 1
-    max_iterations = state.get("max_iterations", 5)
+    max_iterations = state.get("max_iterations", settings.max_agent_steps)
 
     # Check iteration limit - synthesize answer from collected data
     if iteration > max_iterations:
-        logger.warning(f"Max iterations ({max_iterations}) reached")
+        logger.warning("Max iterations (%d) reached", max_iterations)
         messages = state.get("messages", [])
 
         # Extract data from the last ToolMessage (most recent result)
@@ -220,7 +234,7 @@ async def model_node(state: HealthcareAgentState) -> ModelOutput:
         if tool_data:
             # Use the data to synthesize an answer
             answer = f"Based on my analysis:\n\n{tool_data}"
-            logger.info(f"Synthesized answer from tool data: {len(tool_data)} chars")
+            logger.info("Synthesized answer from tool data: %d chars", len(tool_data))
         else:
             answer = "I've reached my processing limit. Based on what I found, please try a more specific question."
 
@@ -229,69 +243,64 @@ async def model_node(state: HealthcareAgentState) -> ModelOutput:
             "iteration": iteration,
         }
 
-    # Get conversation context
-    user_query = state.get("user_query", "")
-    member_id = state.get("member_id")
-    conversation_history = state.get("conversation_history", [])
-    messages = state.get("messages", [])
+    # Get ChatSnowflake with tools bound (ASYNC)
+    
+    llm = await get_chat_snowflake(tools=HEALTHCARE_TOOLS)
+    logger.info("ChatSnowflake created, tools=%s", len(HEALTHCARE_TOOLS))
+    
+    # DEBUG: Log bound tools format
+    if hasattr(llm, "_bound_tools"):
+        import json
+        logger.info("Bound tools payload: %s", json.dumps(llm._bound_tools, indent=2)[:2000])
+    else:
+        logger.warning("No _bound_tools attribute on LLM!")
 
-    # Build member context string
-    member_context = f"Current member ID: {member_id}" if member_id else "No specific member context"
+    # Build messages for LLM
+    messages = _build_chat_messages(state)
+    
+    # DEBUG: Log messages being sent
+    logger.info("Messages count: %d, types: %s", len(messages), [type(m).__name__ for m in messages])
 
-    # Build prompt with full context
-    prompt = build_react_prompt(
-        user_query=user_query,
-        member_id=member_id,
-        conversation_history=conversation_history,
-        scratchpad=_messages_to_scratchpad(messages),
-        member_context=member_context,
-    )
+    try:
+        # Call ChatSnowflake - returns AIMessage with tool_calls or content
+        ai_message = await llm.ainvoke(messages)
 
-    # Get model from settings
-    model = getattr(settings, "cortex_llm_model", "llama3.1-70b")
+        # Debug: Log detailed response info
+        has_tool_calls = bool(ai_message.tool_calls) if hasattr(ai_message, "tool_calls") else False
+        content_len = len(ai_message.content) if ai_message.content else 0
+        response_metadata = getattr(ai_message, "response_metadata", {})
+        usage_metadata = getattr(ai_message, "usage_metadata", {})
 
-    # Call Cortex COMPLETE
-    ai_message = await call_cortex_complete(prompt, model)
+        logger.info(
+            "ReAct iteration %d: tool_calls=%s, content_len=%d, content_preview=%s",
+            iteration,
+            has_tool_calls,
+            content_len,
+            (ai_message.content[:200] if ai_message.content else "EMPTY")[:200],
+        )
+        
+        # Log additional debugging info if response is empty
+        if content_len == 0 and not has_tool_calls:
+            logger.warning(
+                "Empty LLM response! response_metadata=%s, usage_metadata=%s, additional_kwargs=%s",
+                response_metadata,
+                usage_metadata,
+                getattr(ai_message, "additional_kwargs", {}),
+            )
 
-    logger.info(f"ReAct iteration {iteration}: tool_calls={bool(ai_message.tool_calls)}")
+        return {
+            "messages": [ai_message],
+            "iteration": iteration,
+        }
 
-    return {
-        "messages": [ai_message],
-        "iteration": iteration,
-    }
-
-
-def _messages_to_scratchpad(messages: list) -> list[dict]:
-    """Convert messages to scratchpad format for prompt building.
-
-    Extracts thought/action/observation from message sequence.
-    """
-    scratchpad = []
-    i = 0
-
-    while i < len(messages):
-        msg = messages[i]
-
-        if isinstance(msg, AIMessage) and msg.tool_calls:
-            # AI decided to call a tool
-            tool_call = msg.tool_calls[0]
-            step = {
-                "thought": msg.content,  # Thought stored in content
-                "action": tool_call["name"],
-                "action_input": tool_call["args"],
-                "observation": "",
-            }
-
-            # Look for corresponding ToolMessage
-            if i + 1 < len(messages) and isinstance(messages[i + 1], ToolMessage):
-                step["observation"] = messages[i + 1].content
-                i += 1
-
-            scratchpad.append(step)
-
-        i += 1
-
-    return scratchpad
+    except Exception as e:
+        logger.error("ChatSnowflake call failed: %s", e, exc_info=True)
+        return {
+            "messages": [AIMessage(content=f"I encountered an error: {e!s}")],
+            "iteration": iteration,
+            "has_error": True,
+            "last_error": {"error_type": "llm_error", "message": str(e)},
+        }
 
 
 async def final_answer_node(state: HealthcareAgentState) -> FinalAnswerOutput:
@@ -306,13 +315,13 @@ async def final_answer_node(state: HealthcareAgentState) -> FinalAnswerOutput:
 
     # First pass: collect all tools from messages (in order)
     for msg in messages:
-        if isinstance(msg, AIMessage) and msg.tool_calls:
+        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
                 tools_used.append(tc["name"])
 
     # Second pass: get final answer from last non-tool AIMessage
     for msg in reversed(messages):
-        if isinstance(msg, AIMessage) and not msg.tool_calls and msg.content:
+        if isinstance(msg, AIMessage) and not (hasattr(msg, "tool_calls") and msg.tool_calls) and msg.content:
             final_answer = msg.content
             break
 
@@ -324,7 +333,7 @@ async def final_answer_node(state: HealthcareAgentState) -> FinalAnswerOutput:
         tools_used=list(reversed(tools_used)),  # Chronological order
     )
 
-    logger.info(f"Final answer: {len(final_answer)} chars, tools: {tools_used}")
+    logger.info("Final answer: %d chars, tools: %s", len(final_answer), tools_used)
 
     return {
         "final_answer": final_answer,
@@ -337,7 +346,7 @@ async def error_handler_node(state: HealthcareAgentState) -> ErrorHandlerOutput:
     error_count = state.get("error_count", 0) + 1
     last_error = state.get("last_error")
 
-    logger.error(f"Error handler invoked (count: {error_count}): {last_error}")
+    logger.error("Error handler invoked (count: %d): %s", error_count, last_error)
 
     if error_count >= 3:
         # Too many errors, generate error response
@@ -377,15 +386,15 @@ def route_after_model(state: HealthcareAgentState) -> Literal["tools", "final_an
 
     # Check if it's an AIMessage with tool_calls
     if isinstance(last_message, AIMessage):
-        if last_message.tool_calls:
-            logger.info(f"Routing to tools: {last_message.tool_calls[0]['name']}")
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            logger.info("Routing to tools: %s", last_message.tool_calls[0]["name"])
             return "tools"
         else:
             logger.info("Routing to final_answer")
             return "final_answer"
 
     # Unexpected message type
-    logger.warning(f"Unexpected message type: {type(last_message)}")
+    logger.warning("Unexpected message type: %s", type(last_message))
     return "error"
 
 
@@ -477,75 +486,9 @@ def compile_react_graph(checkpointer=None):
 # Module Initialization for langgraph dev
 # =============================================================================
 
-
-def _initialize_snowpark_session() -> None:
-    """Initialize Snowpark session at module load time.
-
-    Creates connection using either:
-    - SPCS OAuth token (when running in Snowpark Container Services)
-    - Local credentials (when running in development)
-    """
-    global _snowpark_session
-
-    if _snowpark_session is not None:
-        return
-
-    from snowflake.snowpark import Session
-
-    if settings.is_spcs:
-        # SPCS mode - use OAuth token
-        import os
-        from pathlib import Path
-
-        logger.info("Initializing Snowpark session with SPCS OAuth token")
-        token_path = Path("/snowflake/session/token")
-        connection_params = {
-            "account": os.environ.get("SNOWFLAKE_ACCOUNT", ""),
-            "host": os.environ.get("SNOWFLAKE_HOST", ""),
-            "authenticator": "oauth",
-            "token": token_path.read_text(),
-            "database": settings.snowflake_database,
-            "warehouse": settings.snowflake_warehouse,
-        }
-    else:
-        # Local mode - use key pair authentication
-        logger.info("Initializing Snowpark session with key pair authentication")
-        from cryptography.hazmat.backends import default_backend
-        from cryptography.hazmat.primitives import serialization
-
-        with open(settings.snowflake_private_key_path, "rb") as key_file:
-            private_key = serialization.load_pem_private_key(
-                key_file.read(),
-                password=settings.snowflake_private_key_passphrase.encode() if settings.snowflake_private_key_passphrase else None,
-                backend=default_backend(),
-            )
-
-        private_key_bytes = private_key.private_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-
-        connection_params = {
-            "account": settings.snowflake_account,
-            "user": settings.snowflake_user,
-            "private_key": private_key_bytes,
-            "database": settings.snowflake_database,
-            "warehouse": settings.snowflake_warehouse,
-            "role": settings.snowflake_role,
-        }
-
-    try:
-        _snowpark_session = Session.builder.configs(connection_params).create()
-        set_snowpark_session(_snowpark_session)
-        logger.info("Snowpark session initialized successfully for ReAct workflow")
-    except Exception as exc:
-        logger.error(f"Failed to initialize Snowpark session: {exc}")
-        raise
-
-
-# Initialize Snowpark session when module is loaded
-_initialize_snowpark_session()
+# NOTE: Session is NOT initialized at module load time.
+# It is lazy-initialized on first request via _ensure_snowpark_session_async()
+# This allows the event loop to be properly running when we make async calls.
 
 # Export compiled graph for langgraph.json
 react_healthcare_graph = build_react_graph().compile()
