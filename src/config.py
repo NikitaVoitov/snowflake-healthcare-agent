@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     cortex_llm_model: str = "claude-3-5-sonnet"
     cortex_search_limit: int = 5
 
+    # Cortex Analyst semantic model path
+    cortex_analyst_semantic_model: str = "@HEALTHCARE_DB.STAGING.SEMANTIC_MODELS/healthcare_semantic_model.yaml"
+
     # LangChain tracing (optional)
     langchain_tracing_v2: bool = False
     langchain_api_key: str | None = None

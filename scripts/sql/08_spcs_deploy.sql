@@ -52,12 +52,12 @@ CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 0
-    COMMENT = 'Healthcare ReAct Agent v1.0.68 - Uses SPCSCortexChat (langchain-snowflake has SPCS bugs: auth format + empty response parsing + content duplication)'
+    COMMENT = 'Healthcare ReAct Agent v1.0.73 - SnowflakeCortexAnalyst migration (langchain-snowflake for both ChatSnowflake + CortexAnalyst)'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.68
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.73
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
@@ -142,7 +142,7 @@ GRANT USAGE ON FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR
 -- -----------------------------------------------------------------------------
 /*
 # VERSION: Update this for each deployment
-export VERSION=v1.0.68
+export VERSION=v1.0.73
 export REGISTRY=cisco-splunkincubation.registry.snowflakecomputing.com
 
 # 1. Build for linux/amd64 (required for SPCS)

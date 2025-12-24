@@ -248,12 +248,12 @@ async def model_node(state: HealthcareAgentState) -> ModelOutput:
     llm = await get_chat_snowflake(tools=HEALTHCARE_TOOLS)
     logger.info("ChatSnowflake created, tools=%s", len(HEALTHCARE_TOOLS))
     
-    # DEBUG: Log bound tools format
+    # DEBUG: Log bound tools count
     if hasattr(llm, "_bound_tools"):
-        import json
-        logger.info("Bound tools payload: %s", json.dumps(llm._bound_tools, indent=2)[:2000])
+        tool_count = len(llm._bound_tools) if llm._bound_tools else 0
+        logger.debug("Bound %d tools to LLM", tool_count)
     else:
-        logger.warning("No _bound_tools attribute on LLM!")
+        logger.debug("No _bound_tools attribute on LLM (SQL mode)")
 
     # Build messages for LLM
     messages = _build_chat_messages(state)

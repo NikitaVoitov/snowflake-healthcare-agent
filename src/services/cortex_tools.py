@@ -1,12 +1,12 @@
 """Async wrappers for Snowflake Cortex services.
 
 This module provides async tools for:
-- Cortex Analyst: NL→SQL conversion using semantic models (via REST API)
+- Cortex Analyst: NL→SQL conversion using langchain-snowflake's SnowflakeCortexAnalyst
 - Cortex Search: Semantic search across knowledge base documents
 
-The Cortex Analyst tool uses the Cortex Analyst REST API with a semantic
-model for accurate natural language to SQL conversion. Falls back to
-direct Snowpark SQL queries in local development environments.
+The Cortex Analyst tool uses langchain-snowflake's SnowflakeCortexAnalyst for
+the REST API call, then executes the generated SQL via Snowpark and post-processes
+the results into structured healthcare data.
 """
 
 from __future__ import annotations
@@ -17,15 +17,13 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from snowflake.snowpark import Session
 from snowflake.snowpark.row import Row
 
 from src.config import settings
-
-if TYPE_CHECKING:
-    from src.services.cortex_analyst_client import AsyncCortexAnalystClient
+from src.services.analyst_service import get_snowflake_analyst
 
 logger = logging.getLogger(__name__)
 
@@ -117,15 +115,16 @@ def _parse_search_result(result_data: str | dict, source: str, limit: int) -> li
 
 
 # =============================================================================
-# Cortex Analyst Tool
+# Cortex Analyst Tool (using langchain-snowflake)
 # =============================================================================
 
 
 class AsyncCortexAnalystTool:
-    """Async wrapper for Cortex Analyst queries using semantic model.
+    """Async wrapper for Cortex Analyst queries using langchain-snowflake.
 
-    Uses Snowflake Cortex Analyst REST API with a YAML semantic model
-    for accurate natural language to SQL conversion.
+    Uses SnowflakeCortexAnalyst from langchain-snowflake for NL→SQL conversion,
+    then executes the generated SQL via Snowpark and post-processes results
+    into structured healthcare data.
 
     In local development (without OAuth), falls back to direct Snowpark
     SQL queries against the denormalized member table.
@@ -138,29 +137,36 @@ class AsyncCortexAnalystTool:
             session: Active Snowpark Session for Snowflake queries.
         """
         self.session = session
-        self._analyst_client: AsyncCortexAnalystClient | None = None
 
-    def _get_analyst_client(self) -> AsyncCortexAnalystClient:
-        """Get or create Cortex Analyst client.
+    def _extract_sql_from_response(self, parsed: dict) -> tuple[str | None, str | None, list[str]]:
+        """Extract SQL, text explanation, and suggestions from SnowflakeCortexAnalyst response.
+
+        Args:
+            parsed: Parsed JSON response from SnowflakeCortexAnalyst._arun()
 
         Returns:
-            AsyncCortexAnalystClient instance.
+            Tuple of (sql_statement, text_explanation, suggestions)
         """
-        if self._analyst_client is None:
-            from src.services.cortex_analyst_client import AsyncCortexAnalystClient
+        sql = None
+        text = None
+        suggestions: list[str] = []
 
-            self._analyst_client = AsyncCortexAnalystClient(
-                session=self.session,
-                database=settings.snowflake_database,
-                schema="STAGING",
-            )
-        return self._analyst_client
+        for item in parsed.get("content", []):
+            item_type = item.get("type")
+            if item_type == "sql":
+                sql = item.get("statement")
+            elif item_type == "text":
+                text = item.get("text")
+            elif item_type == "suggestions":
+                suggestions = item.get("suggestions", [])
+
+        return sql, text, suggestions
 
     async def execute(self, query: str, member_id: str | None = None) -> dict[str, Any]:
-        """Execute natural language query using Cortex Analyst API.
+        """Execute natural language query using Cortex Analyst.
 
-        Uses Cortex Analyst REST API with semantic model for NL→SQL conversion.
-        Supports both SPCS (OAuth) and local (JWT key-pair) authentication.
+        Uses SnowflakeCortexAnalyst from langchain-snowflake for NL→SQL conversion,
+        then executes the SQL and post-processes results.
 
         Args:
             query: Natural language query about healthcare data.
@@ -174,15 +180,16 @@ class AsyncCortexAnalystTool:
         """
         try:
             return await self._execute_via_cortex_analyst_api(query, member_id)
-        except ValueError as exc:
-            # If authentication fails (no token available), fall back to Snowpark
-            if "Cannot retrieve authentication token" in str(exc):
-                logger.warning("Cortex Analyst auth unavailable, using Snowpark fallback")
+        except Exception as exc:
+            # If langchain-snowflake fails, fall back to direct Snowpark queries
+            error_msg = str(exc).lower()
+            if any(kw in error_msg for kw in ["authentication", "token", "unauthorized", "401"]):
+                logger.warning("Cortex Analyst auth failed, using Snowpark fallback: %s", exc)
                 return await self._execute_via_snowpark(query, member_id)
             raise
 
     async def _execute_via_cortex_analyst_api(self, query: str, member_id: str | None = None) -> dict[str, Any]:
-        """Execute query using Cortex Analyst REST API with semantic model.
+        """Execute query using SnowflakeCortexAnalyst from langchain-snowflake.
 
         Args:
             query: Natural language query.
@@ -191,17 +198,32 @@ class AsyncCortexAnalystTool:
         Returns:
             Structured query results.
         """
-        client = self._get_analyst_client()
-
         # Enhance query with member context if provided
         enhanced_query = query
         if member_id:
             enhanced_query = f"For member ID {member_id}: {query}"
 
-        logger.info(f"Cortex Analyst API query: {enhanced_query[:100]}...")
+        logger.info(f"Cortex Analyst query: {enhanced_query[:100]}...")
 
-        # Call Cortex Analyst API
-        response = await client.execute_query(enhanced_query)
+        # Get SnowflakeCortexAnalyst instance from factory
+        analyst = get_snowflake_analyst(self.session)
+
+        # Call SnowflakeCortexAnalyst._arun() - returns JSON string
+        json_result = await analyst._arun(enhanced_query)
+
+        # Parse JSON response
+        try:
+            parsed = json.loads(json_result)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Cortex Analyst response: {e}")
+            return {
+                "member_id": member_id,
+                "error": f"Invalid response format: {e}",
+                "raw_response": json_result[:500] if json_result else None,
+            }
+
+        # Extract SQL, text, and suggestions from response
+        sql, interpretation, suggestions = self._extract_sql_from_response(parsed)
 
         # Build result structure
         result: dict[str, Any] = {
@@ -212,36 +234,83 @@ class AsyncCortexAnalystTool:
             "grievance": {},
             "raw_response": None,
             "aggregate_result": None,
-            "sql": response.get("sql"),
-            "interpretation": response.get("interpretation"),
-            "suggestions": response.get("suggestions", []),
-            "request_id": response.get("request_id"),
+            "sql": sql,
+            "interpretation": interpretation,
+            "suggestions": suggestions,
+            "request_id": parsed.get("request_id"),
+            "warnings": parsed.get("warnings", []),
         }
 
-        # Handle errors or suggestions
-        if response.get("error"):
-            result["error"] = response["error"]
-            logger.warning(f"Cortex Analyst error: {response['error']}")
+        # Handle suggestions (ambiguous query)
+        if suggestions and not sql:
+            result["error"] = "Question was ambiguous. See suggestions for alternatives."
+            logger.info(f"Cortex Analyst returned suggestions: {suggestions}")
             return result
 
-        if response.get("suggestions"):
-            logger.info(f"Cortex Analyst returned suggestions: {response['suggestions']}")
+        # If no SQL was generated, return error
+        if not sql:
+            result["error"] = "Could not generate SQL for this question."
+            logger.warning("No SQL generated by Cortex Analyst")
             return result
 
-        # Process query results
-        rows = response.get("results", [])
-        if rows:
-            result["raw_response"] = str(rows)
-            result_type = self._detect_result_type(query, rows)
+        # Execute the generated SQL and process results
+        return await self._execute_sql_and_process(sql, query, member_id, result)
 
-            if result_type == "member_info":
-                self._extract_member_info(rows, result, member_id)
-            elif result_type == "claims":
-                result["claims"] = self._format_claims(rows)
-            elif result_type == "aggregate":
-                result["aggregate_result"] = self._format_aggregate(rows)
-            else:
-                result["aggregate_result"] = {"query_type": "general", "data": rows}
+    async def _execute_sql_and_process(
+        self,
+        sql: str,
+        original_query: str,
+        member_id: str | None,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Execute generated SQL via Snowpark and process results.
+
+        Args:
+            sql: SQL statement to execute.
+            original_query: Original natural language query (for result type detection).
+            member_id: Optional member ID.
+            result: Result dictionary to update.
+
+        Returns:
+            Updated result dictionary with query results.
+        """
+        try:
+
+            def _execute_sql() -> list[dict]:
+                """Execute SQL synchronously (for thread pool)."""
+                # Ensure warehouse is set
+                self.session.sql(f"USE WAREHOUSE {settings.snowflake_warehouse}").collect()
+                rows = self.session.sql(sql).collect()
+                # Convert rows to dictionaries
+                results = []
+                for row in rows:
+                    if hasattr(row, "as_dict"):
+                        results.append(row.as_dict())
+                    else:
+                        # Fallback for older Snowpark versions
+                        results.append(dict(zip(row._fields, row, strict=True)))
+                return results
+
+            rows = await asyncio.to_thread(_execute_sql)
+            logger.info(f"Executed SQL successfully, returned {len(rows)} rows")
+
+            # Process query results
+            if rows:
+                result["raw_response"] = str(rows)
+                result_type = self._detect_result_type(original_query, rows)
+
+                if result_type == "member_info":
+                    self._extract_member_info(rows, result, member_id)
+                elif result_type == "claims":
+                    result["claims"] = self._format_claims(rows)
+                elif result_type == "aggregate":
+                    result["aggregate_result"] = self._format_aggregate(rows)
+                else:
+                    result["aggregate_result"] = {"query_type": "general", "data": rows}
+
+        except Exception as exc:
+            logger.error(f"SQL execution failed: {exc}")
+            result["error"] = f"SQL execution error: {exc!s}"
 
         return result
 
