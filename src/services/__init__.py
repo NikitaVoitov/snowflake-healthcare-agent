@@ -7,6 +7,7 @@ Import directly from submodules when needed.
 from src.services.analyst_service import get_snowflake_analyst
 from src.services.checkpointer import create_checkpointer
 from src.services.cortex_tools import AsyncCortexAnalystTool, AsyncCortexSearchTool
+from src.services.search_service import get_cortex_search_retrievers
 from src.services.snowflake_checkpointer import CustomAsyncSnowflakeSaver
 
 # AgentService is imported lazily to avoid circular import with react_workflow
@@ -17,5 +18,6 @@ __all__ = [
     "AsyncCortexSearchTool",
     "CustomAsyncSnowflakeSaver",
     "create_checkpointer",
+    "get_cortex_search_retrievers",
     "get_snowflake_analyst",
 ]

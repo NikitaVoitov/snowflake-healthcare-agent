@@ -49,71 +49,6 @@ def _row_to_dict(row: Row) -> dict[str, Any]:
     return dict(zip(row._fields, row, strict=True))
 
 
-def _get_search_columns(source: str) -> str:
-    """Get column specification for search source.
-
-    Args:
-        source: Search service name.
-
-    Returns:
-        JSON array string of columns to return.
-    """
-    column_map = {
-        "FAQS_SEARCH": '["faq_id", "question", "answer"]',
-        "POLICIES_SEARCH": '["policy_id", "policy_name", "content"]',
-        "TRANSCRIPTS_SEARCH": '["transcript_id", "member_id", "summary"]',
-    }
-    return column_map.get(source, "[]")
-
-
-def _parse_search_result(result_data: str | dict, source: str, limit: int) -> list[dict]:
-    """Parse Cortex Search result into structured format.
-
-    Args:
-        result_data: Raw search result (JSON string or dict).
-        source: Search service name for metadata.
-        limit: Maximum results to return.
-
-    Returns:
-        List of parsed search result dictionaries.
-    """
-    parsed_results: list[dict] = []
-
-    try:
-        json_data = json.loads(result_data) if isinstance(result_data, str) else result_data
-
-        search_results = json_data.get("results", [])
-        for item in search_results[:limit]:
-            # Combine relevant fields into text, truncated to 5000 chars
-            text_parts = []
-            for key, val in item.items():
-                if key not in ["@scores", "@search_score"] and val:
-                    text_parts.append(f"{key}: {val}")
-            text = " | ".join(text_parts)[:5000]
-
-            parsed_results.append(
-                {
-                    "text": text,
-                    "score": item.get("@search_score", 0.9),
-                    "source": source.lower().replace("_search", ""),
-                    "metadata": item.get("@scores", {}),
-                }
-            )
-
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning(f"Failed to parse search result: {e}")
-        parsed_results.append(
-            {
-                "text": str(result_data)[:5000],
-                "score": 0.9,
-                "source": source.lower().replace("_search", ""),
-                "metadata": {},
-            }
-        )
-
-    return parsed_results
-
-
 # =============================================================================
 # Cortex Analyst Tool (using langchain-snowflake)
 # =============================================================================
@@ -670,15 +605,20 @@ class AsyncCortexAnalystTool:
 
 
 # =============================================================================
-# Cortex Search Tool
+# Cortex Search Tool (using langchain-snowflake)
 # =============================================================================
 
 
 class AsyncCortexSearchTool:
-    """Async wrapper for Cortex Search queries across knowledge base.
+    """Parallel search using langchain-snowflake SnowflakeCortexSearchRetriever.
 
     Searches across FAQs, policies, and transcripts using Snowflake
-    Cortex Search with parallel execution.
+    Cortex Search REST API with parallel execution via asyncio.TaskGroup.
+
+    Uses REST API instead of SEARCH_PREVIEW SQL function for:
+    - Production-ready performance (no 300KB limit)
+    - Native async support (aiohttp)
+    - Parameterized queries (no SQL injection risk)
     """
 
     def __init__(self, session: Session) -> None:
@@ -688,58 +628,88 @@ class AsyncCortexSearchTool:
             session: Active Snowpark Session for Snowflake queries.
         """
         self.session = session
+        self._retrievers: dict | None = None
 
-    def _execute_search(self, source: str, query: str, limit: int) -> list[dict]:
-        """Execute single source search synchronously.
+    @property
+    def retrievers(self) -> dict:
+        """Lazy-load retrievers on first access."""
+        if self._retrievers is None:
+            from src.services.search_service import get_cortex_search_retrievers
+
+            self._retrievers = get_cortex_search_retrievers(self.session)
+        return self._retrievers
+
+    def _source_to_key(self, source: str) -> str:
+        """Convert source name to retriever key.
+
+        Args:
+            source: Service name like "FAQS_SEARCH".
+
+        Returns:
+            Lowercase key like "faqs".
+        """
+        return source.replace("_SEARCH", "").lower()
+
+    def _convert_documents_to_results(self, docs: list, source: str) -> list[dict]:
+        """Convert LangChain Documents to our result dict format.
+
+        Args:
+            docs: List of Document objects from retriever.
+            source: Original source name for labeling.
+
+        Returns:
+            List of dicts with text, score, source, metadata.
+        """
+        results = []
+        for doc in docs:
+            # Combine metadata fields into text (same format as before)
+            text_parts = []
+            for key, val in doc.metadata.items():
+                if key not in ["@search_score", "_formatted_for_rag", "_original_page_content", "_content_field_used"] and val:
+                    text_parts.append(f"{key}: {val}")
+            text = " | ".join(text_parts)[:5000]
+
+            results.append(
+                {
+                    "text": text,
+                    "score": doc.metadata.get("@search_score", 0.9),
+                    "source": self._source_to_key(source),  # "faqs", "policies", "transcripts"
+                    "metadata": doc.metadata,
+                }
+            )
+        return results
+
+    async def _search_source_async(self, source: str, query: str, limit: int) -> list[dict]:
+        """Search single source using SnowflakeCortexSearchRetriever.
 
         Args:
             source: Search service name (e.g., FAQS_SEARCH).
-            query: Search query text.
-            limit: Maximum results to return.
-
-        Returns:
-            List of parsed search results.
-        """
-        self.session.sql(f"USE WAREHOUSE {settings.snowflake_warehouse}").collect()
-
-        escaped_query = query.replace("'", "''").replace('"', '\\"')
-        columns = _get_search_columns(source)
-
-        sql = f"""
-        SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-            'HEALTHCARE_DB.KNOWLEDGE_SCHEMA.{source}',
-            '{{"query": "{escaped_query}", "columns": {columns}, "limit": {limit}}}'
-        ) AS results
-        """
-
-        try:
-            logger.info("Searching %s for: %s", source, query[:50])
-            rows = self.session.sql(sql).collect()
-        except Exception as exc:
-            logger.warning("Search source %s failed: %s", source, exc)
-            return []
-
-        parsed_results: list[dict] = []
-        for row in rows:
-            row_dict = row.as_dict() if hasattr(row, "as_dict") else row
-            result_data = row_dict.get("RESULTS", "{}")
-            parsed_results.extend(_parse_search_result(result_data, source, limit))
-
-        logger.info("Search %s returned %d results", source, len(parsed_results))
-        return parsed_results
-
-    async def _search_source_async(self, source: str, query: str, limit: int) -> list[dict]:
-        """Execute search for a single source asynchronously.
-
-        Args:
-            source: Search service name.
             query: Search query text.
             limit: Maximum results per source.
 
         Returns:
             List of search results for this source.
         """
-        return await asyncio.to_thread(self._execute_search, source, query, limit)
+        key = self._source_to_key(source)
+        retriever = self.retrievers.get(key)
+
+        if not retriever:
+            logger.warning("Unknown search source: %s", source)
+            return []
+
+        # Update k if different limit requested
+        if retriever.k != limit:
+            retriever.k = limit
+
+        try:
+            logger.info("Searching %s (REST API) for: %s", source, query[:50])
+            docs = await retriever.ainvoke(query)
+            results = self._convert_documents_to_results(docs, source)
+            logger.info("Search %s returned %d results", source, len(results))
+            return results
+        except Exception as e:
+            logger.warning("Search %s failed: %s", source, e)
+            return []
 
     async def execute(
         self,

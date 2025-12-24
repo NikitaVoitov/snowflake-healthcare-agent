@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.49 (Dec 2024) - ChatSnowflake uses pre-created session in SPCS
+-- Current version: v1.0.80 (Dec 2024) - Fixed analyst/search results extraction using tool_call_id matching
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
@@ -16,6 +16,8 @@
 --   8. ChatSnowflake from langchain-snowflake for native Cortex integration
 --   9. claude-3-5-sonnet model required for tool calling support
 --  10. Fully async architecture - no blocking calls in event loop
+--  11. Distroless images need CMD as args only (ENTRYPOINT=python3 already set)
+--  12. langchain-snowflake patches required for SPCS OAuth (SNOWFLAKE_HOST)
 -- =============================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -52,12 +54,12 @@ CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 0
-    COMMENT = 'Healthcare ReAct Agent v1.0.73 - SnowflakeCortexAnalyst migration (langchain-snowflake for both ChatSnowflake + CortexAnalyst)'
+    COMMENT = 'Healthcare ReAct Agent v1.0.80 - Fixed analyst/search results extraction'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.73
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:1.0.80
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
@@ -142,7 +144,7 @@ GRANT USAGE ON FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR
 -- -----------------------------------------------------------------------------
 /*
 # VERSION: Update this for each deployment
-export VERSION=v1.0.73
+export VERSION=1.0.80
 export REGISTRY=cisco-splunkincubation.registry.snowflakecomputing.com
 
 # 1. Build for linux/amd64 (required for SPCS)

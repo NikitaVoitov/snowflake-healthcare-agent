@@ -226,24 +226,51 @@ class AgentService:
     def _extract_analyst_results(self, messages: list) -> dict | None:
         """Extract analyst results from messages.
 
+        Searches for query_member_data tool calls and finds their corresponding
+        ToolMessage results by matching tool_call_id (not position).
+
         Args:
             messages: List of messages.
 
         Returns:
             Analyst results dict or None.
         """
-        for i, msg in enumerate(messages):
+        # Debug: log message types and structure
+        logger.debug(
+            "Extracting analyst results from %d messages: %s",
+            len(messages),
+            [(type(m).__name__, getattr(m, "tool_call_id", None) if hasattr(m, "tool_call_id") else "N/A") for m in messages],
+        )
+
+        # Build a map of tool_call_id -> ToolMessage content
+        tool_results: dict[str, str] = {}
+        for msg in messages:
+            if isinstance(msg, ToolMessage) and hasattr(msg, "tool_call_id"):
+                tool_results[msg.tool_call_id] = msg.content
+                logger.debug("Found ToolMessage with tool_call_id=%s", msg.tool_call_id)
+
+        logger.debug("Tool results map: %s", list(tool_results.keys()))
+
+        # Find query_member_data tool calls and get their results by tool_call_id
+        for msg in messages:
             if not (isinstance(msg, AIMessage) and msg.tool_calls):
                 continue
-            tool_name = msg.tool_calls[0].get("name", "")
-            is_analyst = tool_name == "query_member_data"
-            has_next_tool_msg = i + 1 < len(messages) and isinstance(messages[i + 1], ToolMessage)
-            if is_analyst and has_next_tool_msg:
-                return {"raw_response": messages[i + 1].content}
+            for tool_call in msg.tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_id = tool_call.get("id", "")
+                logger.debug("Checking tool_call: name=%s, id=%s", tool_name, tool_id)
+                if tool_name == "query_member_data" and tool_id in tool_results:
+                    logger.info("Found analyst results for tool_call_id=%s", tool_id)
+                    return {"raw_response": tool_results[tool_id]}
+
+        logger.warning("No analyst results found despite analyst routing")
         return None
 
     def _extract_search_results(self, messages: list) -> list | None:
         """Extract search results from messages.
+
+        Searches for search_knowledge tool calls and finds their corresponding
+        ToolMessage results by matching tool_call_id (not position).
 
         Args:
             messages: List of messages.
@@ -251,14 +278,22 @@ class AgentService:
         Returns:
             Search results list or None.
         """
-        for i, msg in enumerate(messages):
+        # Build a map of tool_call_id -> ToolMessage content
+        tool_results: dict[str, str] = {}
+        for msg in messages:
+            if isinstance(msg, ToolMessage) and hasattr(msg, "tool_call_id"):
+                tool_results[msg.tool_call_id] = msg.content
+
+        # Find search_knowledge tool calls and get their results by tool_call_id
+        for msg in messages:
             if not (isinstance(msg, AIMessage) and msg.tool_calls):
                 continue
-            tool_name = msg.tool_calls[0].get("name", "")
-            is_search = tool_name == "search_knowledge"
-            has_next_tool_msg = i + 1 < len(messages) and isinstance(messages[i + 1], ToolMessage)
-            if is_search and has_next_tool_msg:
-                return [{"text": messages[i + 1].content, "source": "knowledge_base"}]
+            for tool_call in msg.tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_id = tool_call.get("id", "")
+                if tool_name == "search_knowledge" and tool_id in tool_results:
+                    return [{"text": tool_results[tool_id], "source": "knowledge_base"}]
+
         return None
 
     async def stream(

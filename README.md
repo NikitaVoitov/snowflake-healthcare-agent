@@ -1,8 +1,8 @@
 # Healthcare Contact Center ReAct Agent
 
-An AI-powered healthcare contact center assistant built with **ReAct (Reasoning + Acting)** pattern using LangGraph on Snowflake.
+An AI-powered healthcare contact center assistant built with **ReAct (Reasoning + Acting)** pattern using LangGraph on Snowflake SPCS.
 
-**Current Version:** v1.0.73 | **Architecture:** ReAct Pattern with langchain-snowflake Integration
+**Current Version:** v1.0.80 | **Architecture:** ReAct Pattern with Full langchain-snowflake Integration | **Image:** 191MB (Distroless)
 
 ---
 
@@ -25,7 +25,7 @@ This lab builds a **production-ready AI assistant** using the **ReAct pattern**:
 - **Native tool calling** via `langchain-snowflake` ChatSnowflake (claude-3-5-sonnet)
 - **Intelligent tool selection** - automatic tool binding with `llm.bind_tools()`
 - **Semantic model** for NL→SQL via `SnowflakeCortexAnalyst` REST API
-- **Parallel search** across FAQs, Policies, and Call Transcripts
+- **Parallel search** via `SnowflakeCortexSearchRetriever` REST API across FAQs, Policies, and Transcripts
 - **Conversation memory** persisted via Snowflake checkpointer
 - **Fully async** orchestration via LangGraph with `asyncio.TaskGroup`
 
@@ -44,7 +44,7 @@ flowchart TD
         ServiceFunction["HEALTHCARE_AGENT_QUERY Function"]
     end
 
-    subgraph spcs["SPCS Container - v1.0.73"]
+    subgraph spcs["SPCS Container - v1.0.80 (Distroless)"]
         FastAPI["FastAPI + uvicorn"]
         ReactService["ReActAgentService"]
         
@@ -61,12 +61,13 @@ flowchart TD
     subgraph langchain["langchain-snowflake (patched)"]
         ChatSnowflake["ChatSnowflake<br/>claude-3-5-sonnet"]
         CortexAnalyst["SnowflakeCortexAnalyst<br/>NL→SQL"]
+        CortexRetriever["SnowflakeCortexSearchRetriever<br/>REST API"]
     end
 
     subgraph cortex["Cortex Services"]
         CortexREST["Cortex REST API<br/>/api/v2/cortex/inference:complete"]
         AnalystREST["Cortex Analyst REST API<br/>/api/v2/cortex/analyst/message"]
-        CortexSearch["CORTEX.SEARCH_PREVIEW"]
+        CortexSearch["SnowflakeCortexSearchRetriever<br/>REST API"]
     end
 
     subgraph db["HEALTHCARE_DB"]
@@ -90,7 +91,8 @@ flowchart TD
     ModelNode --> ChatSnowflake
     ChatSnowflake --> CortexREST
     ToolNode -->|query_member_data| CortexAnalyst
-    ToolNode -->|search_knowledge| CortexSearch
+    ToolNode -->|search_knowledge| CortexRetriever
+    CortexRetriever --> CortexSearch
     CortexAnalyst --> AnalystREST
     AnalystREST --> SemanticModel
     AnalystREST --> MemberData
@@ -210,6 +212,7 @@ healthcare/
 │       ├── react_agent_service.py       # AgentService.execute(), .stream()
 │       ├── llm_service.py               # ChatSnowflake factory (langchain-snowflake)
 │       ├── analyst_service.py           # SnowflakeCortexAnalyst factory
+│       ├── search_service.py            # SnowflakeCortexSearchRetriever factory
 │       ├── cortex_tools.py              # AsyncCortexAnalystTool, AsyncCortexSearchTool
 │       └── snowflake_checkpointer.py    # SQLAlchemy-based LangGraph checkpointer
 │
@@ -220,14 +223,14 @@ healthcare/
 │   │   ├── 03_load_data.sql             # Data loading
 │   │   ├── 04_cortex_services.sql       # Cortex Search services
 │   │   ├── 05_compute_resources.sql     # Compute pool, warehouse
-│   │   ├── 08_spcs_deploy.sql           # SPCS deployment (v1.0.73)
+│   │   ├── 08_spcs_deploy.sql           # SPCS deployment (v1.0.80)
 │   │   ├── 09_semantic_model.sql        # Semantic model stage/upload
 │   │   └── semantic_models/
 │   │       └── healthcare_semantic_model.yaml  # Cortex Analyst NL→SQL model
 │   └── streamlit/
 │       └── payer_assistant.py           # Streamlit chat interface
 │
-├── tests/                               # 79 tests
+├── tests/                               # tests
 │   ├── conftest.py                      # ReAct-specific fixtures
 │   ├── unit/
 │   │   ├── test_models.py
@@ -242,7 +245,8 @@ healthcare/
 │
 ├── pyproject.toml                       # Dependencies (Python 3.11-3.13)
 ├── langgraph.json                       # LangGraph config (react_healthcare only)
-├── Dockerfile                           # SPCS container with patches applied
+├── Dockerfile                           # Distroless multi-stage build (191MB)
+├── .dockerignore                        # Excludes tests, docs, .venv from build context
 └── README.md
 ```
 
@@ -277,7 +281,7 @@ healthcare/
 | **Structured Data** | Cortex Analyst API | NL→SQL via semantic model |
 | **Unstructured Data** | Cortex Search | FAQs, policies, call transcripts |
 | **Validation** | Pydantic v2 | Request/response models |
-| **Deployment** | SPCS | Snowflake Container Services |
+| **Deployment** | SPCS | Snowflake Container Services (Distroless) |
 
 ---
 
@@ -335,22 +339,27 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 ### SPCS Deployment
 
 ```bash
-# Build Docker image for linux/amd64
-docker buildx build --platform linux/amd64 -t healthcare-agent:v1.0.73 .
+# Build Docker image for linux/amd64 (Distroless - 191MB)
+docker buildx build --platform linux/amd64 -t healthcare-agent:1.0.80 .
 
 # Tag and push to Snowflake registry
 REGISTRY="your-account.registry.snowflakecomputing.com"
-docker tag healthcare-agent:v1.0.73 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.73
+docker tag healthcare-agent:1.0.80 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.80
 snow spcs image-registry login -c jwt
-docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.73
+docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.80
 
 # Deploy service
 snow sql -c jwt --filename scripts/sql/08_spcs_deploy.sql
 ```
 
-> **Note:** The Docker image includes patched `langchain-snowflake` files for SPCS compatibility:
-> - `rest_client.py`: Uses `SNOWFLAKE_HOST` environment variable for correct OAuth authentication
-> - `tools.py`: Fixes `content_list` parsing to prevent empty responses
+> **Docker Optimization (66% smaller):**
+> - Base: `gcr.io/distroless/python3-debian12` (53MB vs 125MB slim)
+> - Multi-stage build with aggressive stripping (no `__pycache__`, tests, docs)
+> - Production-only dependencies via `uv sync --only-group spcs-production`
+
+> **langchain-snowflake Patches (applied in Dockerfile):**
+> - `rest_client.py`: Uses `SNOWFLAKE_HOST` for correct OAuth authentication in SPCS
+> - `tools.py`: Fixes `content_list` parsing to prevent content duplication (issue #35)
 
 ### Test SPCS Service
 

@@ -48,20 +48,42 @@ test = [
 ]
 
 spcs = [
+    # Core LangGraph/LangChain (minimal)
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",           # NOT full langchain (saves ~5MB)
+    "langchain-snowflake>=0.2.2",
+    "langgraph-checkpoint-snowflake>=0.1.0",
+    # Snowflake
+    "snowflake-snowpark-python>=1.14.0",
+    "snowflake-sqlalchemy>=1.6.0",
+    # FastAPI (minimal - NO uvloop/httptools/websockets)
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",                 # NOT uvicorn[standard] (saves ~14MB)
+    # HTTP/Auth
+    "aiohttp>=3.9.0",
+    "PyJWT>=2.8.0",
+    "cryptography>=43.0.0",
+    # Pydantic
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+]
+
+# PEP 735 dependency-groups for isolated installs (used with uv --only-group)
+[dependency-groups]
+spcs-production = [
     "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
     "langchain-snowflake>=0.2.2",
-    "snowflake-snowpark-python>=1.14.0",
     "langgraph-checkpoint-snowflake>=0.1.0",
+    "snowflake-snowpark-python>=1.14.0",
+    "snowflake-sqlalchemy>=1.6.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
     "aiohttp>=3.9.0",
     "PyJWT>=2.8.0",
+    "cryptography>=43.0.0",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
-    "cryptography>=43.0.0",
-    "sqlalchemy>=2.0.0",
-    "snowflake-sqlalchemy>=1.6.0",
 ]
 
 [build-system]
