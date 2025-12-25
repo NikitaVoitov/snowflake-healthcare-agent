@@ -2,8 +2,6 @@
 
 An AI-powered healthcare contact center assistant built with **ReAct (Reasoning + Acting)** pattern using LangGraph on Snowflake SPCS.
 
-**Current Version:** v1.0.80 | **Architecture:** ReAct Pattern with Full langchain-snowflake Integration | **Image:** 191MB (Distroless)
-
 ---
 
 ## Executive Summary
@@ -20,7 +18,7 @@ Traditional systems require agents to navigate multiple applications, causing de
 
 ### The Solution
 
-This lab builds a **production-ready AI assistant** using the **ReAct pattern**:
+This lab builds a **production-ready AI assistant** using the **ReAct loop pattern**:
 
 - **Native tool calling** via `langchain-snowflake` ChatSnowflake (claude-3-5-sonnet)
 - **Intelligent tool selection** - automatic tool binding with `llm.bind_tools()`
@@ -210,7 +208,7 @@ healthcare/
 │   │   ├── 03_load_data.sql             # Data loading
 │   │   ├── 04_cortex_services.sql       # Cortex Search services
 │   │   ├── 05_compute_resources.sql     # Compute pool, warehouse
-│   │   ├── 08_spcs_deploy.sql           # SPCS deployment (v1.0.80)
+│   │   ├── 08_spcs_deploy.sql           # SPCS deployment
 │   │   ├── 09_semantic_model.sql        # Semantic model stage/upload
 │   │   └── semantic_models/
 │   │       └── healthcare_semantic_model.yaml  # Cortex Analyst NL→SQL model
@@ -230,7 +228,7 @@ healthcare/
 │   ├── langchain_snowflake_rest_client_patched.py   # SNOWFLAKE_HOST fix
 │   └── langchain_snowflake_tools_patched.py         # content_list parsing fix
 │
-├── pyproject.toml                       # Dependencies (Python 3.11-3.13)
+├── pyproject.toml                       # Dependencies (Python 3.11)
 ├── langgraph.json                       # LangGraph config (react_healthcare only)
 ├── Dockerfile                           # Distroless multi-stage build (191MB)
 ├── .dockerignore                        # Excludes tests, docs, .venv from build context
@@ -244,15 +242,11 @@ healthcare/
 | Feature | Description |
 |---------|-------------|
 | **Native Tool Calling** | `ChatSnowflake.bind_tools()` with automatic schema generation |
-| **langchain-snowflake** | Full integration with official Snowflake LangChain library |
+| **Langchain-snowflake** | Full integration with official Snowflake LangChain library |
 | **Semantic Model** | NL→SQL via `SnowflakeCortexAnalyst` with verified queries |
-| **claude-3-5-sonnet** | Anthropic model with superior tool-calling capabilities |
-| **Full Personal Info** | Extracts all member fields (name, DOB, smoker, lifestyle, chronic condition) |
 | **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
-| **Tool Tracking** | Records all tools used per conversation turn |
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
 | **SPCS OAuth** | Automatic `Snowflake Token` authentication via session |
-| **Fully Async** | All operations use `async/await` with `asyncio.to_thread()` for blocking calls |
 
 ---
 
@@ -291,12 +285,12 @@ cd /path/to/healthcare
 uv sync --group dev
 
 # Run SQL setup scripts
-snow sql -c jwt --filename scripts/sql/01_setup_db.sql
-snow sql -c jwt --filename scripts/sql/02_checkpoint_schema.sql
+snow sql -c <your_connection_name> --filename scripts/sql/01_setup_db.sql
+snow sql -c <your_connection_name> --filename scripts/sql/02_checkpoint_schema.sql
 # ... continue with remaining scripts
 
 # Upload semantic model
-snow sql -c jwt --filename scripts/sql/09_semantic_model.sql
+snow sql -c <your_connection_name> --filename scripts/sql/09_semantic_model.sql
 # PUT file to @STAGING.SEMANTIC_MODELS
 
 # Start LangGraph dev server
@@ -326,7 +320,7 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 ### SPCS Deployment
 
 ```bash
-# Build Docker image for linux/amd64 (Distroless - 191MB)
+# Build Docker image for linux/amd64 (Distroless)
 docker buildx build --platform linux/amd64 -t healthcare-agent:1.0.80 .
 
 # Tag and push to Snowflake registry
@@ -338,11 +332,6 @@ docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent
 # Deploy service
 snow sql -c jwt --filename scripts/sql/08_spcs_deploy.sql
 ```
-
-> **Docker Optimization (66% smaller):**
-> - Base: `gcr.io/distroless/python3-debian12` (53MB vs 125MB slim)
-> - Multi-stage build with aggressive stripping (no `__pycache__`, tests, docs)
-> - Production-only dependencies via `uv sync --only-group spcs-production`
 
 > **langchain-snowflake Patches (applied in Dockerfile):**
 > - `rest_client.py`: Uses `SNOWFLAKE_HOST` for correct OAuth authentication in SPCS
