@@ -5,10 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.services.llm_service import (
-    SPCS_TOKEN_PATH,
     _create_local_chat_model,
     _create_spcs_chat_model,
-    _load_private_key_sync,
     get_chat_snowflake,
     get_chat_snowflake_with_structured_output,
     get_session,
