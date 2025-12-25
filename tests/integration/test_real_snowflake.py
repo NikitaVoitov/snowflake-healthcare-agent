@@ -354,15 +354,12 @@ class TestRealCheckpointer:
                 "max_iterations": 5,
                 "final_answer": None,
                 "execution_id": thread_id,
-                "error_count": 0,
-                "last_error": None,
-                "has_error": False,
             },
             config=config,
         )
 
         # Verify execution completed (ReAct should have final_answer)
-        assert result.get("final_answer") is not None or result.get("has_error") is True
+        assert result.get("final_answer") is not None
 
         # Verify checkpoint was saved
         checkpoint = await checkpointer.aget_tuple(config)
