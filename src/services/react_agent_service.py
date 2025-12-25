@@ -334,14 +334,21 @@ class AgentService:
             data={"thread_id": thread_id, "query": request.query, "is_continuation": is_continuation},
         )
 
+        # Collect all messages for final extraction
+        all_messages: list = []
+        final_answer = ""
+
         try:
             async for event in self.graph.astream(initial_state, config=config):
                 for node_name, node_output in event.items():
+                    # Accumulate messages from each node
+                    node_messages = node_output.get("messages", [])
+                    all_messages.extend(node_messages)
+
                     if node_name == "model":
                         # Model produced output
-                        messages = node_output.get("messages", [])
-                        if messages and isinstance(messages[-1], AIMessage):
-                            last_msg = messages[-1]
+                        if node_messages and isinstance(node_messages[-1], AIMessage):
+                            last_msg = node_messages[-1]
                             if last_msg.tool_calls:
                                 yield StreamEvent(
                                     event_type="react_thought",
@@ -360,8 +367,7 @@ class AgentService:
                                 )
                     elif node_name == "tools":
                         # Tools executed
-                        messages = node_output.get("messages", [])
-                        tool_results = [m.content[:100] for m in messages if isinstance(m, ToolMessage)]
+                        tool_results = [m.content[:100] for m in node_messages if isinstance(m, ToolMessage)]
                         if tool_results:
                             yield StreamEvent(
                                 event_type="react_action",
@@ -369,10 +375,11 @@ class AgentService:
                                 data={"result_preview": str(tool_results)[:200]},
                             )
                     elif node_name == "final_answer":
+                        final_answer = node_output.get("final_answer", "")
                         yield StreamEvent(
                             event_type="react_answer",
                             node=node_name,
-                            data={"answer": node_output.get("final_answer", "")},
+                            data={"answer": final_answer},
                         )
                     else:
                         yield StreamEvent(
@@ -381,10 +388,21 @@ class AgentService:
                             data={"node": node_name},
                         )
 
+            # Extract tools used and results from accumulated messages
+            tools_used = self._extract_tools_from_messages(all_messages)
+            routing = self._determine_routing(tools_used)
+            analyst_results = self._extract_analyst_results(all_messages)
+            search_results = self._extract_search_results(all_messages)
+
             yield StreamEvent(
                 event_type="complete",
                 node="react_workflow",
-                data={"thread_id": thread_id},
+                data={
+                    "thread_id": thread_id,
+                    "routing": routing,
+                    "analyst_results": analyst_results,
+                    "search_results": search_results,
+                },
             )
 
         except Exception as exc:

@@ -1,5 +1,8 @@
 # Healthcare Contact Center ReAct Agent
 
+**Version:** v1.0.82  
+**Last Updated:** December 25, 2024
+
 An AI-powered healthcare contact center assistant built with **ReAct (Reasoning + Acting)** pattern using LangGraph on Snowflake SPCS.
 
 ---
@@ -232,6 +235,10 @@ healthcare/
 │   ├── langchain_snowflake_rest_client_patched.py   # SNOWFLAKE_HOST fix
 │   └── langchain_snowflake_tools_patched.py         # content_list parsing fix
 │
+├── streamlit/                           # Streamlit Container Runtime app
+│   ├── app.py                           # SSE streaming + service function fallback
+│   └── pyproject.toml                   # Container Runtime dependencies
+│
 ├── pyproject.toml                       # Dependencies (Python 3.11)
 ├── langgraph.json                       # LangGraph config (react_healthcare only)
 ├── Dockerfile                           # Distroless multi-stage build (191MB)
@@ -250,14 +257,34 @@ healthcare/
 | **Semantic Model** | NL→SQL via `SnowflakeCortexAnalyst` with verified queries |
 | **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
-| **SPCS OAuth** | Automatic `Snowflake Token` authentication via session |
-| **Modern Error Handling** | Native LangGraph `RetryPolicy` with automatic retries for transient failures |
+| **SPCS OAuth + Auto-Refresh** | Automatic token refresh when SPCS OAuth tokens expire |
+| **Modern Error Handling** | Native LangGraph `RetryPolicy` with automatic retries (max 3 attempts) |
+| **SSE Streaming** | Real-time progress updates via `/agents/stream` endpoint |
+| **Container Runtime** | Streamlit app runs on SPCS compute pool with internal DNS access |
 
 ---
 
 ## Streamlit UI
 
 ![stremlit_app_ui](https://github.com/user-attachments/assets/0dc71a12-c8e9-4cd1-92ae-5a6925ae33e2)
+
+### Streaming Mode
+
+The Streamlit app supports **real-time SSE streaming** when running on Container Runtime:
+
+- **Enable streaming progress** toggle shows live tool execution status
+- Real-time events: `🤔 Thinking...` → `📊 Calling tool` → `📥 Results` → `✅ Answer`
+- Full `analystResults` and `searchResults` returned in streaming mode
+- Fallback to synchronous service function if streaming unavailable
+
+### Container Runtime vs Warehouse Runtime
+
+| Feature | Container Runtime | Warehouse Runtime |
+|---------|------------------|-------------------|
+| **Compute** | SPCS Compute Pool | Virtual Warehouse |
+| **Network** | Internal DNS access | External only |
+| **Streaming** | ✅ SSE via `/agents/stream` | ❌ Service function only |
+| **Dependencies** | `pyproject.toml` | `environment.yml` |
 
 
 ---
@@ -333,13 +360,14 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 
 ```bash
 # Build Docker image for linux/amd64 (Distroless)
-docker buildx build --platform linux/amd64 -t healthcare-agent:1.0.81 .
+VERSION=1.0.82
+docker buildx build --platform linux/amd64 -t healthcare-agent:$VERSION .
 
 # Tag and push to Snowflake registry
 REGISTRY="your-account.registry.snowflakecomputing.com"
-docker tag healthcare-agent:1.0.81 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.81
+docker tag healthcare-agent:$VERSION ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:$VERSION
 snow spcs image-registry login -c <your_connection_name>
-docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.81
+docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:$VERSION
 
 # Deploy service
 snow sql -c <your_connection_name> --filename scripts/sql/08_spcs_deploy.sql

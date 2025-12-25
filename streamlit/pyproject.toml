@@ -1,0 +1,15 @@
+# Streamlit Container Runtime dependencies
+# For use with SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
+
+[project]
+name = "healthcare-assistant"
+version = "1.0.81"
+description = "Healthcare Contact Center Assistant - Streamlit App"
+requires-python = ">=3.11"
+
+dependencies = [
+    "streamlit>=1.35.0",
+    "requests>=2.31.0",
+    "snowflake-snowpark-python>=1.20.0",
+]
+

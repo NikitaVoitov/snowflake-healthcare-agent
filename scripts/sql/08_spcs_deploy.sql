@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.81 (Dec 2024) - Modern error handling with RetryPolicy, fixed ChatSnowflake streaming
+-- Current version: v1.0.82 (Dec 2024) - SSE streaming support, Container Runtime for Streamlit
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
@@ -47,19 +47,19 @@ DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
 -- -----------------------------------------------------------------------------
 -- Step 4: Create the SPCS Service
 -- -----------------------------------------------------------------------------
--- WORKING version - ChatSnowflake uses pre-created session (v1.0.49)
+-- WORKING version - SSE streaming + Container Runtime support (v1.0.82)
 CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     IN COMPUTE POOL AGENTS_POOL
     EXTERNAL_ACCESS_INTEGRATIONS = (HEALTHCARE_EXTERNAL_ACCESS)
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 0
-    COMMENT = 'Healthcare ReAct Agent v1.0.81 - Modern error handling with RetryPolicy'
+    COMMENT = 'Healthcare ReAct Agent v1.0.82 - SSE streaming support for Container Runtime'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:1.0.81
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:1.0.82
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
