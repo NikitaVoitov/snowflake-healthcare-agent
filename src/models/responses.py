@@ -12,8 +12,6 @@ class AgentResponse(BaseSchema):
     routing: str = Field(..., description="Routing decision: analyst | search | both")
     execution_id: str = Field(..., description="Unique execution identifier")
     checkpoint_id: str | None = Field(None, description="LangGraph checkpoint ID")
-    error_count: int = Field(default=0, description="Number of errors during execution")
-    last_error: dict | None = Field(None, description="Last error details if any")
     analyst_results: dict | None = Field(None, description="Cortex Analyst results")
     search_results: list | None = Field(None, description="Cortex Search results")
 
