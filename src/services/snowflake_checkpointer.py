@@ -9,13 +9,12 @@ import json
 import logging
 import os
 import random
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Optional, Sequence, cast
+from typing import Any, cast
 
 import snowflake.connector
-from snowflake.connector import DictCursor
-
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
@@ -27,12 +26,13 @@ from langgraph.checkpoint.base import (
     get_checkpoint_id,
 )
 from langgraph.checkpoint.serde.types import TASKS, ChannelProtocol
+from snowflake.connector import DictCursor
 
 from src.config import is_running_in_spcs, settings
 
 logger = logging.getLogger(__name__)
 
-MetadataInput = Optional[dict[str, Any]]
+MetadataInput = dict[str, Any] | None
 
 # =============================================================================
 # SQL Statements
@@ -330,10 +330,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
         """Create checkpoint tables if they don't exist."""
         async with self._cursor() as cur:
             try:
-                await cur.execute(
-                    f"SELECT v FROM {self.schema}.LANGGRAPH_CHECKPOINT_MIGRATIONS "
-                    "ORDER BY v DESC LIMIT 1"
-                )
+                await cur.execute(f"SELECT v FROM {self.schema}.LANGGRAPH_CHECKPOINT_MIGRATIONS ORDER BY v DESC LIMIT 1")
                 row = await cur.fetchone()
                 version = row["V"] if row else -1
             except Exception:
@@ -341,10 +338,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
 
             for v, migration in enumerate(MIGRATIONS[version + 1 :], start=version + 1):
                 await cur.execute(migration.format(schema=self.schema))
-                await cur.execute(
-                    f"INSERT INTO {self.schema}.LANGGRAPH_CHECKPOINT_MIGRATIONS (v) "
-                    f"VALUES ({v})"
-                )
+                await cur.execute(f"INSERT INTO {self.schema}.LANGGRAPH_CHECKPOINT_MIGRATIONS (v) VALUES ({v})")
                 logger.info(f"Applied migration {v}")
 
     # -------------------------------------------------------------------------
@@ -360,10 +354,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
         """Load checkpoint from database format."""
         return {
             **checkpoint,
-            "pending_sends": [
-                self.serde.loads_typed((c, bytes.fromhex(b)))
-                for c, b in (pending_sends or [])
-            ],
+            "pending_sends": [self.serde.loads_typed((c, bytes.fromhex(b))) for c, b in (pending_sends or [])],
             "channel_values": self._load_blobs(channel_values),
         }
 
@@ -371,11 +362,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
         """Load blobs from database format."""
         if not blob_values:
             return {}
-        return {
-            k: self.serde.loads_typed((t, bytes.fromhex(v)))
-            for k, t, v in blob_values
-            if t != "empty"
-        }
+        return {k: self.serde.loads_typed((t, bytes.fromhex(v))) for k, t, v in blob_values if t != "empty"}
 
     def _dump_checkpoint(self, checkpoint: Checkpoint) -> dict[str, Any]:
         """Dump checkpoint for database storage."""
@@ -401,26 +388,23 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
                 type_str, blob_hex = "empty", ""
 
             # Order: thread_id, checkpoint_ns, channel, version, type, blob
-            result.append((
-                thread_id,
-                checkpoint_ns,
-                k,
-                cast(str, ver),
-                type_str,
-                blob_hex,
-            ))
+            result.append(
+                (
+                    thread_id,
+                    checkpoint_ns,
+                    k,
+                    cast(str, ver),
+                    type_str,
+                    blob_hex,
+                )
+            )
         return result
 
-    def _load_writes(
-        self, writes: list[list[str]] | None
-    ) -> list[tuple[str, str, Any]]:
+    def _load_writes(self, writes: list[list[str]] | None) -> list[tuple[str, str, Any]]:
         """Load writes from database format."""
         if not writes:
             return []
-        return [
-            (tid, channel, self.serde.loads_typed((t, bytes.fromhex(v))))
-            for tid, channel, t, v in writes
-        ]
+        return [(tid, channel, self.serde.loads_typed((t, bytes.fromhex(v)))) for tid, channel, t, v in writes]
 
     def _dump_writes(
         self,
@@ -435,16 +419,18 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
         for idx, (channel, value) in enumerate(writes):
             type_str, blob_bytes = self.serde.dumps_typed(value)
             # Order: thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob
-            result.append((
-                thread_id,
-                checkpoint_ns,
-                checkpoint_id,
-                task_id,
-                WRITES_IDX_MAP.get(channel, idx),
-                channel,
-                type_str,
-                blob_bytes.hex() if blob_bytes else "",
-            ))
+            result.append(
+                (
+                    thread_id,
+                    checkpoint_ns,
+                    checkpoint_id,
+                    task_id,
+                    WRITES_IDX_MAP.get(channel, idx),
+                    channel,
+                    type_str,
+                    blob_bytes.hex() if blob_bytes else "",
+                )
+            )
         return result
 
     def _load_metadata(self, metadata: dict[str, Any]) -> CheckpointMetadata:
@@ -464,7 +450,9 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
         return str(value).replace("'", "''")
 
     def get_next_version(
-        self, current: str | None, channel: ChannelProtocol
+        self,
+        current: str | None,
+        channel: ChannelProtocol,  # noqa: ARG002
     ) -> str:
         """Generate next version string."""
         if current is None:
@@ -512,16 +500,8 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
                 return None
 
             row = rows[0]
-            checkpoint_data = (
-                json.loads(row["CHECKPOINT"])
-                if isinstance(row["CHECKPOINT"], str)
-                else row["CHECKPOINT"]
-            )
-            metadata_data = (
-                json.loads(row["METADATA"])
-                if isinstance(row["METADATA"], str)
-                else row["METADATA"]
-            )
+            checkpoint_data = json.loads(row["CHECKPOINT"]) if isinstance(row["CHECKPOINT"], str) else row["CHECKPOINT"]
+            metadata_data = json.loads(row["METADATA"]) if isinstance(row["METADATA"], str) else row["METADATA"]
             cp_id = row["CHECKPOINT_ID"]
             parent_cp_id = row["PARENT_CHECKPOINT_ID"]
 
@@ -539,9 +519,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
                 )
                 await cur.execute(blob_query, None)
                 blob_rows = await cur.fetchall()
-                channel_values = [
-                    [r["CHANNEL"], r["TYPE"], r["BLOB_HEX"]] for r in blob_rows
-                ]
+                channel_values = [[r["CHANNEL"], r["TYPE"], r["BLOB_HEX"]] for r in blob_rows]
 
             # Query 3: Get pending writes
             writes_query = SELECT_WRITES_SQL.format(
@@ -552,10 +530,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
             )
             await cur.execute(writes_query, None)
             writes_rows = await cur.fetchall()
-            pending_writes = [
-                [r["TASK_ID"], r["CHANNEL"], r["TYPE"], r["BLOB_HEX"]]
-                for r in writes_rows
-            ]
+            pending_writes = [[r["TASK_ID"], r["CHANNEL"], r["TYPE"], r["BLOB_HEX"]] for r in writes_rows]
 
             # Query 4: Get pending sends (from parent checkpoint)
             pending_sends: list[list[str]] = []
@@ -579,9 +554,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
                         "checkpoint_id": cp_id,
                     }
                 },
-                checkpoint=self._load_checkpoint(
-                    checkpoint_data, channel_values, pending_sends
-                ),
+                checkpoint=self._load_checkpoint(checkpoint_data, channel_values, pending_sends),
                 metadata=self._load_metadata(metadata_data),
                 parent_config={
                     "configurable": {
@@ -616,20 +589,14 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
                 wheres.append(f"checkpoint_id = '{self._escape(checkpoint_id)}'")
 
         if filter:
-            wheres.append(
-                f"OBJECT_CONTAINS(metadata, PARSE_JSON($${json.dumps(filter)}$$))"
-            )
+            wheres.append(f"OBJECT_CONTAINS(metadata, PARSE_JSON($${json.dumps(filter)}$$))")
 
         if before:
             before_id = get_checkpoint_id(before)
             wheres.append(f"checkpoint_id < '{self._escape(before_id)}'")
 
         where_clause = "WHERE " + " AND ".join(wheres) if wheres else ""
-        query = (
-            SELECT_CHECKPOINT_SQL.format(schema=self.schema)
-            + where_clause
-            + " ORDER BY checkpoint_id DESC"
-        )
+        query = SELECT_CHECKPOINT_SQL.format(schema=self.schema) + where_clause + " ORDER BY checkpoint_id DESC"
         if limit:
             query += f" LIMIT {limit}"
 
@@ -638,16 +605,8 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
             rows = await cur.fetchall()
 
             for row in rows:
-                checkpoint_data = (
-                    json.loads(row["CHECKPOINT"])
-                    if isinstance(row["CHECKPOINT"], str)
-                    else row["CHECKPOINT"]
-                )
-                metadata_data = (
-                    json.loads(row["METADATA"])
-                    if isinstance(row["METADATA"], str)
-                    else row["METADATA"]
-                )
+                checkpoint_data = json.loads(row["CHECKPOINT"]) if isinstance(row["CHECKPOINT"], str) else row["CHECKPOINT"]
+                metadata_data = json.loads(row["METADATA"]) if isinstance(row["METADATA"], str) else row["METADATA"]
                 tid = row["THREAD_ID"]
                 cns = row["CHECKPOINT_NS"]
                 cp_id = row["CHECKPOINT_ID"]
@@ -688,9 +647,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
         configurable = config["configurable"].copy()
         thread_id = configurable.pop("thread_id")
         checkpoint_ns = configurable.pop("checkpoint_ns", "")
-        checkpoint_id = configurable.pop(
-            "checkpoint_id", configurable.pop("thread_ts", None)
-        )
+        checkpoint_id = configurable.pop("checkpoint_id", configurable.pop("thread_ts", None))
 
         copy = checkpoint.copy()
         channel_values = copy.pop("channel_values")  # type: ignore[misc]
@@ -704,9 +661,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
         }
 
         # Dump blobs
-        blob_args = self._dump_blobs(
-            thread_id, checkpoint_ns, channel_values, new_versions
-        )
+        blob_args = self._dump_blobs(thread_id, checkpoint_ns, channel_values, new_versions)
 
         async with self._cursor() as cur:
             # Insert blobs - use string formatting
@@ -745,11 +700,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
         task_id: str,
     ) -> None:
         """Store intermediate writes linked to checkpoint."""
-        query_template = (
-            UPSERT_CHECKPOINT_WRITES_SQL
-            if all(w[0] in WRITES_IDX_MAP for w in writes)
-            else INSERT_CHECKPOINT_WRITES_SQL
-        )
+        query_template = UPSERT_CHECKPOINT_WRITES_SQL if all(w[0] in WRITES_IDX_MAP for w in writes) else INSERT_CHECKPOINT_WRITES_SQL
 
         write_args = self._dump_writes(
             config["configurable"]["thread_id"],
@@ -865,9 +816,7 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(
-                    asyncio.run, self.aput_writes(config, writes, task_id)
-                )
+                future = pool.submit(asyncio.run, self.aput_writes(config, writes, task_id))
                 future.result()
         else:
             asyncio.run(self.aput_writes(config, writes, task_id))
@@ -888,4 +837,3 @@ async def create_async_snowflake_checkpointer() -> CustomAsyncSnowflakeSaver:
     await checkpointer.asetup()
     logger.info("AsyncSnowflakeSaver initialized with persistent Snowflake storage")
     return checkpointer
-
