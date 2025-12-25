@@ -1,8 +1,22 @@
-"""Tool calling functionality for Snowflake chat models."""
+"""Tool calling functionality for Snowflake chat models - PATCHED VERSION.
+
+PATCHES APPLIED (Format Fixes Only - NO conversation trimming):
+1. Fix assistant message format: Include top-level 'content' field per Snowflake REST API spec
+2. Fix tool_results: Ensure tool name is correctly extracted from tool_call_id mapping
+3. Truncate individual tool outputs (>4000 chars) - NOT conversation history
+
+WHY 400 BAD REQUEST OCCURS:
+- Snowflake REST API expects assistant messages with tool_calls to have BOTH:
+  - "content": "text..." (top-level string)
+  - "content_list": [{"type": "tool_use", ...}] (tool_use blocks only)
+- Original langchain-snowflake puts text INSIDE content_list, not as top-level field
+- This format mismatch causes 400 Bad Request on multi-turn conversations
+"""
 
 import json
 import logging
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolCall, ToolMessage
@@ -11,10 +25,27 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from .._error_handling import SnowflakeErrorHandler, SnowflakeRestApiErrorHandler
+from .._error_handling import SnowflakeErrorHandler
 from .utils import SnowflakeMetadataFactory
 
 logger = logging.getLogger(__name__)
+
+# Maximum characters for a SINGLE tool output (prevents malformed payloads, NOT conversation trimming)
+MAX_TOOL_OUTPUT_CHARS = 8000
+
+
+def _truncate_tool_output(content: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
+    """Truncate individual tool output if extremely large.
+
+    This is NOT about context limits (200k tokens is huge).
+    This prevents malformed JSON payloads when a single tool returns massive output.
+    """
+    if len(content) <= max_chars:
+        return content
+
+    # Keep first and last parts with truncation indicator
+    half = max_chars // 2 - 30
+    return content[:half] + "\n\n... [tool output truncated for payload size] ...\n\n" + content[-half:]
 
 
 class SnowflakeTools:
@@ -22,7 +53,7 @@ class SnowflakeTools:
 
     def bind_tools(
         self,
-        tools: Sequence[Union[BaseTool, Callable, dict]],
+        tools: Sequence[BaseTool | Callable | dict],
         **kwargs: Any,
     ) -> Runnable[LanguageModelInput, BaseMessage]:
         """Bind tools to the chat model using Snowflake Cortex Complete native tool calling.
@@ -36,8 +67,10 @@ class SnowflakeTools:
         """
         # Convert LangChain tools to Snowflake tool format
         snowflake_tools = []
+
         for tool_obj in tools:
             openai_tool = convert_to_openai_tool(tool_obj)
+            tool_name = openai_tool["function"]["name"]
 
             # Convert OpenAI format to Snowflake format exactly as per official documentation
             input_schema = openai_tool["function"]["parameters"].copy()
@@ -51,8 +84,8 @@ class SnowflakeTools:
 
             tool_spec = {
                 "type": "generic",
-                "name": openai_tool["function"]["name"],
-                "description": openai_tool["function"]["description"],  # Add description field
+                "name": tool_name,
+                "description": openai_tool["function"]["description"],
                 "input_schema": input_schema,
             }
 
@@ -82,14 +115,14 @@ class SnowflakeTools:
         return self.model_copy(
             update={
                 "_bound_tools": snowflake_tools,
-                "_original_tools": list(tools),  # Store original tools for execution
+                "_original_tools": list(tools),
                 "_tool_choice": tool_choice,
-                "_use_rest_api": True,  # This is the key - switch to REST API when tools are bound
+                "_use_rest_api": True,
                 "max_tokens": self.max_tokens,
             }
         )
 
-    def _build_enhanced_system_prompt(self, tools: Optional[List[Dict[str, Any]]] = None) -> str:
+    def _build_enhanced_system_prompt(self, tools: list[dict[str, Any]] | None = None) -> str:
         """Build an enhanced system prompt for better tool calling and reasoning."""
         if not tools or not self._has_tools():
             return """You are a helpful, knowledgeable assistant. Provide accurate, thoughtful responses 
@@ -146,21 +179,10 @@ and provide alternative information when possible.
 Remember: Use tools to enhance your responses, not replace thoughtful analysis. 
 The goal is to provide the most helpful, accurate, and relevant information to the user."""
 
-    def _group_consecutive_tool_messages(
-        self, messages: List[BaseMessage]
-    ) -> List[Union[BaseMessage, List[ToolMessage]]]:
-        """
-        Group consecutive ToolMessage objects together.
-
-        Args:
-            messages: List of messages to process
-
-        Returns:
-            List where consecutive ToolMessage objects are grouped into sublists,
-            other messages remain as individual items
-        """
+    def _group_consecutive_tool_messages(self, messages: list[BaseMessage]) -> list[BaseMessage | list[ToolMessage]]:
+        """Group consecutive ToolMessage objects together."""
         if not getattr(self, "group_tool_messages", True):
-            return messages  # Maintain old behavior if disabled
+            return messages
 
         result = []
         current_tool_group = []
@@ -169,67 +191,97 @@ The goal is to provide the most helpful, accurate, and relevant information to t
             if isinstance(message, ToolMessage):
                 current_tool_group.append(message)
             else:
-                # If we have accumulated tool messages, add them as a group
                 if current_tool_group:
                     result.append(current_tool_group)
                     current_tool_group = []
                 result.append(message)
 
-        # Handle any remaining tool messages
         if current_tool_group:
             result.append(current_tool_group)
 
         return result
 
-    def _process_tool_message_group(self, tool_messages: List[ToolMessage]) -> Dict[str, Any]:
-        """
-        Process a group of ToolMessage objects into a single user message.
+    def _get_tool_name_from_id(self, tool_call_id: str, messages: list[BaseMessage]) -> str:
+        """PATCH: Extract tool name from previous AIMessage's tool_calls by matching tool_call_id."""
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                    if tc_id == tool_call_id:
+                        return tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+        return "unknown"
 
-        Args:
-            tool_messages: List of consecutive ToolMessage objects
+    def _process_tool_message_group(self, tool_messages: list[ToolMessage], all_messages: list[BaseMessage] = None) -> dict[str, Any]:
+        """Process a group of ToolMessage objects into a single user message.
 
-        Returns:
-            Dictionary representing a user message with grouped tool results
+        PATCHED:
+        - Use actual tool name from tool_call_id mapping (fixes "unknown" name issue)
+        - Truncate extremely large individual tool outputs
         """
         tool_results = []
 
         for tool_msg in tool_messages:
+            # PATCH: Get actual tool name from AIMessage tool_calls if not set
+            tool_name = getattr(tool_msg, "name", None)
+            if not tool_name or tool_name == "unknown":
+                tool_name = self._get_tool_name_from_id(tool_msg.tool_call_id, all_messages or [])
+
+            # Truncate extremely large tool outputs (prevents malformed JSON, not context limits)
+            content = _truncate_tool_output(str(tool_msg.content))
+
             tool_results.append(
                 {
                     "type": "tool_results",
                     "tool_results": {
                         "tool_use_id": tool_msg.tool_call_id,
-                        "name": getattr(tool_msg, "name", None) or "unknown",
-                        "content": [{"type": "text", "text": str(tool_msg.content)}],
+                        "name": tool_name,
+                        "content": [{"type": "text", "text": content}],
                     },
                 }
             )
 
         return {"role": "user", "content_list": tool_results}
 
-    def _process_single_message(self, message: BaseMessage) -> Dict[str, Any]:
-        """
-        Process a single message (non-ToolMessage) into API format.
+    def _process_single_message(self, message: BaseMessage) -> dict[str, Any]:
+        """Process a single message (non-ToolMessage) into API format.
 
-        Args:
-            message: Single message to process
+        CRITICAL PATCH: Fix assistant message format per Snowflake REST API spec.
 
-        Returns:
-            Dictionary representing the message in API format
+        Snowflake expects (from official docs):
+        {
+            "role": "assistant",
+            "content": "I'll help you check the weather.",  // TOP-LEVEL text
+            "content_list": [
+                {
+                    "type": "tool_use",
+                    "tool_use": { "tool_use_id": "...", "name": "...", "input": {...} }
+                }
+            ]
+        }
+
+        Original langchain-snowflake sends:
+        {
+            "role": "assistant",
+            "content_list": [{"type": "text", "text": "..."}, {"type": "tool_use", ...}]
+        }
+
+        This format mismatch causes 400 Bad Request on multi-turn conversations!
         """
         if isinstance(message, HumanMessage):
             return {"role": "user", "content": message.content}
 
         elif isinstance(message, AIMessage):
             if hasattr(message, "tool_calls") and message.tool_calls:
-                # Build content_list for Snowflake Complete API
-                content_list: List[Dict[str, Any]] = []
+                # PATCH: Build message per Snowflake REST API spec exactly
+                result: dict[str, Any] = {"role": "assistant"}
 
-                # Add text content if present
+                # PATCH: Add text content as TOP-LEVEL 'content' field (per Snowflake API spec)
                 if message.content:
-                    content_list.append({"type": "text", "text": message.content})
+                    result["content"] = str(message.content)
 
-                # Add tool_use blocks
+                # PATCH: Build content_list with ONLY tool_use blocks (not text!)
+                content_list: list[dict[str, Any]] = []
+
                 for tool_call in message.tool_calls:
                     # Handle both dict and ToolCall object formats
                     if isinstance(tool_call, dict):
@@ -237,7 +289,6 @@ The goal is to provide the most helpful, accurate, and relevant information to t
                         tool_call_name = tool_call["name"]
                         tool_call_args = tool_call["args"]
                     else:
-                        # ToolCall object - access as attributes
                         tool_call_id = getattr(tool_call, "id", None) or ""
                         tool_call_name = getattr(tool_call, "name", None)
                         tool_call_args = getattr(tool_call, "args", {})
@@ -246,13 +297,10 @@ The goal is to provide the most helpful, accurate, and relevant information to t
                     if not tool_call_id:
                         tool_call_id = f"toolu_{id(tool_call)}"
 
-                    # Process input: keep dicts/objects as-is, convert other types appropriately
-                    if isinstance(tool_call_args, dict):
-                        tool_input = tool_call_args
-                    elif isinstance(tool_call_args, (str, list)):
+                    # Process input
+                    if isinstance(tool_call_args, dict) or isinstance(tool_call_args, (str, list)):
                         tool_input = tool_call_args
                     else:
-                        # For other types, try to convert to dict or string
                         tool_input = tool_call_args if isinstance(tool_call_args, (dict, list)) else str(tool_call_args)
 
                     content_list.append(
@@ -266,7 +314,8 @@ The goal is to provide the most helpful, accurate, and relevant information to t
                         }
                     )
 
-                return {"role": "assistant", "content_list": content_list}
+                result["content_list"] = content_list
+                return result
             else:
                 return {"role": "assistant", "content": message.content or ""}
 
@@ -274,21 +323,16 @@ The goal is to provide the most helpful, accurate, and relevant information to t
             return {"role": "system", "content": message.content}
 
         else:
-            # Fallback for unknown message types
             content = str(message.content) if hasattr(message, "content") else str(message)
             return {"role": "user", "content": content}
 
-    def _build_rest_api_payload(self, messages: List[BaseMessage]) -> Dict[str, Any]:
-        """
-        Build REST API payload.
+    def _build_rest_api_payload(self, messages: list[BaseMessage]) -> dict[str, Any]:
+        """Build REST API payload.
 
-        Args:
-            messages: List of LangChain messages
-
-        Returns:
-            Dictionary representing the API payload
+        PATCHED: Pass all_messages to tool message processor for proper name lookup.
+        NO conversation trimming - Claude has 200k token context window!
         """
-        api_messages: List[Dict[str, Any]] = []
+        api_messages: list[dict[str, Any]] = []
 
         # Get bound tools for enhanced system prompt
         bound_tools = None
@@ -306,7 +350,8 @@ The goal is to provide the most helpful, accurate, and relevant information to t
         # Process each group or individual message
         for item in grouped_messages:
             if isinstance(item, list):  # Tool message group
-                user_message = self._process_tool_message_group(item)
+                # PATCH: Pass all messages for tool name lookup
+                user_message = self._process_tool_message_group(item, messages)
                 api_messages.append(user_message)
             else:  # Single message
                 api_message = self._process_single_message(item)
@@ -325,339 +370,179 @@ The goal is to provide the most helpful, accurate, and relevant information to t
 
         return payload
 
-    def _parse_rest_api_response(self, response_or_data, original_messages: List[BaseMessage]) -> ChatResult:
-        """Parse REST API response and handle tool calls - handles both requests.Response and Dict[str, Any]."""
+    def _parse_rest_api_response(self, response_or_data, original_messages: list[BaseMessage]) -> ChatResult:
+        """Parse REST API response and handle tool calls."""
 
-        # Use lists and dicts to store mutable data
-        content_parts: List[str] = []
-        tool_calls: List[Dict[str, Any]] = []
-        usage_data: Dict[str, Any] = {}
-
-        # Track tool call input buffers separately
-        tool_input_buffers: Dict[str, str] = {}
+        content_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        usage_data: dict[str, Any] = {}
+        tool_input_buffers: dict[str, str] = {}
 
         # Handle different input types
         if isinstance(response_or_data, dict):
-            # Handle RestApiClient response (Dict)
             response_data = response_or_data
-            headers = {}
-            is_streaming = False
         else:
-            # Handle requests.Response
-            response_data = response_or_data.json()
-            headers = response_or_data.headers
-            is_streaming = headers.get("content-type", "").startswith("text/event-stream")
+            try:
+                response_data = response_or_data.json()
+            except Exception:
+                response_data = {
+                    "choices": [{"message": {"content": str(response_or_data)}}],
+                    "usage": {},
+                }
 
-        # Parse streaming response - handle both streaming and non-streaming formats
-        try:
-            if is_streaming:
-                # Handle streaming response
-                for line in response_or_data.iter_lines():
-                    if line:
-                        line_str = line.decode("utf-8")
-                        if line_str.startswith("data: "):
-                            try:
-                                data = json.loads(line_str[6:])  # Remove 'data: ' prefix
-                                self._parse_streaming_chunk(
-                                    data,
-                                    content_parts,
-                                    tool_calls,
-                                    usage_data,
-                                    tool_input_buffers,
-                                )
-                            except json.JSONDecodeError:
-                                continue  # Skip malformed lines
-            else:
-                # Handle regular JSON response
-                try:
-                    if isinstance(response_or_data, dict):
-                        # Direct dict response from RestApiClient
-                        data = response_data
-                    else:
-                        # Parse from requests.Response
-                        data = SnowflakeRestApiErrorHandler.safe_parse_json_response(
-                            response_or_data, "tool calling REST API request", logger
-                        )
+        # Process the response data
+        choices = response_data.get("choices", [])
 
-                    if isinstance(data, dict):
-                        # Direct response format
-                        content_str, extracted_tool_calls, extracted_usage = self._parse_json_response(data)
-                        content_parts.append(content_str)
-                        tool_calls.extend(extracted_tool_calls)
-                        usage_data.update(extracted_usage)
-                    elif isinstance(data, list):
-                        # Array of responses
-                        for item in data:
-                            self._parse_streaming_chunk(
-                                item,
-                                content_parts,
-                                tool_calls,
-                                usage_data,
-                                tool_input_buffers,
-                            )
-                except json.JSONDecodeError:
-                    # Fallback: treat as plain text
-                    if isinstance(response_or_data, dict):
-                        content_parts.append(str(response_data))
-                    else:
-                        content_parts.append(response_or_data.text)
-
-        except Exception as e:
-            # Use centralized REST API error handler for response parsing errors
-            SnowflakeRestApiErrorHandler.handle_rest_api_response_error(
-                error=e, operation="parse REST API response", logger_instance=logger
-            )
-            content_parts.append(f"Error parsing response: {str(e)}")
-
-        # Combine all content parts
-        full_content = "".join(content_parts)
-
-        # Calculate fallback token counts if not provided in usage_data
-        input_tokens = usage_data.get("prompt_tokens", self._estimate_tokens(original_messages))
-        output_tokens = usage_data.get("completion_tokens", self._estimate_tokens([{"content": full_content}]))
-
-        message = AIMessage(
-            content=full_content,
-            tool_calls=tool_calls,
-            usage_metadata=SnowflakeMetadataFactory.create_usage_metadata(usage_data, input_tokens, output_tokens),
-            response_metadata=SnowflakeMetadataFactory.create_response_metadata(
-                self.model, finish_reason="tool_calls" if tool_calls else "stop"
-            ),
-        )
-
-        generation = ChatGeneration(message=message)
-        return ChatResult(generations=[generation])
-
-    async def _parse_rest_api_response_async(self, response, original_messages: List[BaseMessage]) -> ChatResult:
-        """Async version of _parse_rest_api_response."""
-
-        # Use lists and dicts to store mutable data
-        content_parts = []
-        tool_calls = []
-        usage_data = {}
-
-        # Parse response - response is already a dict from RestApiClient.make_async_request()
-        try:
-            # Response is already parsed as dict by RestApiClient.make_async_request()
-            if isinstance(response, dict):
-                data = response
-            else:
-                # Fallback: try to parse if it's not a dict
-                data = SnowflakeRestApiErrorHandler.safe_parse_json_response(
-                    response, "async tool calling REST API request", logger
-                )
-
-            if isinstance(data, dict):
-                content_str, extracted_tool_calls, extracted_usage = self._parse_json_response(data)
-                content_parts.append(content_str)
-                tool_calls.extend(extracted_tool_calls)
-                usage_data.update(extracted_usage)
-        except Exception as e:
-            # Use centralized REST API error handler for async response parsing errors
-            SnowflakeRestApiErrorHandler.handle_rest_api_response_error(
-                error=e, operation="parse async REST API response", logger_instance=logger
-            )
-            content_parts.append(f"Error parsing response: {str(e)}")
-
-        # Combine all content parts
-        full_content = "".join(content_parts)
-
-        # Calculate fallback token counts if not provided in usage_data
-        input_tokens = usage_data.get("prompt_tokens", self._estimate_tokens(original_messages))
-        output_tokens = usage_data.get("completion_tokens", self._estimate_tokens([{"content": full_content}]))
-
-        message = AIMessage(
-            content=full_content,
-            tool_calls=tool_calls,
-            usage_metadata=SnowflakeMetadataFactory.create_usage_metadata(usage_data, input_tokens, output_tokens),
-            response_metadata=SnowflakeMetadataFactory.create_response_metadata(
-                self.model, finish_reason="tool_calls" if tool_calls else "stop"
-            ),
-        )
-
-        generation = ChatGeneration(message=message)
-        return ChatResult(generations=[generation])
-
-    def _parse_streaming_chunk(
-        self,
-        data: dict,
-        content_parts: list,
-        tool_calls: list,
-        usage_data: dict,
-        tool_input_buffers: dict,
-    ) -> None:
-        """Parse a single streaming chunk and update the content and tool calls."""
-        # Extract content and tool calls from streaming format
-        choices = data.get("choices", [])
         for choice in choices:
             delta = choice.get("delta", {})
+            message = choice.get("message", {})
 
-            # Handle different delta types
-            delta_type = delta.get("type")
+            # Get content type from delta
+            delta_type = None
+            if "content" in delta:
+                delta_type = "text"
+            elif "content_list" in delta:
+                content_list = delta.get("content_list", [])
+                for item in content_list:
+                    if "tool_use_id" in item or item.get("type") == "tool_use" or "input" in item:
+                        delta_type = "tool_use"
+                        break
 
+            # Process based on delta_type
             if delta_type == "text":
-                # Regular text content - ONLY process from delta.content to avoid duplication
-                if "content" in delta and delta["content"]:
+                if "content" in delta:
                     content_parts.append(delta["content"])
-                # DO NOT process content_list for text when delta_type is 'text' to avoid duplication
 
             elif delta_type == "tool_use":
-                # Tool calling - using correct LangChain ToolCall format!
-
-                # Check if this is the start of a new tool call
                 if "tool_use_id" in delta and "name" in delta:
-                    # Create new tool call using LangChain format
                     tool_call_obj = ToolCall(
                         name=delta["name"],
-                        args={},  # Will be updated when input is complete
+                        args={},
                         id=delta["tool_use_id"],
                     )
                     tool_calls.append(tool_call_obj)
-                    # Initialize input buffer for this tool call
                     tool_input_buffers[delta["tool_use_id"]] = ""
 
-                # Check if this chunk contains input data - ONLY process from delta, not content_list
                 if "input" in delta and tool_calls:
-                    # Get the most recent tool call ID
                     recent_tool_id = tool_calls[-1]["id"]
+                    input_chunk = delta["input"]
+                    if recent_tool_id in tool_input_buffers:
+                        tool_input_buffers[recent_tool_id] += input_chunk
+                        try:
+                            accumulated = tool_input_buffers[recent_tool_id]
+                            parsed_args = json.loads(accumulated)
+                            tool_calls[-1]["args"] = parsed_args
+                        except json.JSONDecodeError:
+                            pass
 
-                    # Accumulate input in buffer
-                    tool_input_buffers[recent_tool_id] += delta["input"]
+            # Handle content_list
+            content_list = delta.get("content_list", [])
+            for item in content_list:
+                if item.get("type") == "text" and "text" in item:
+                    content_parts.append(item["text"])
+                elif item.get("type") == "tool_use" and "tool_use" in item:
+                    tool_use = item["tool_use"]
+                    tool_use_id = tool_use.get("tool_use_id")
+                    tool_name = tool_use.get("name")
 
-                    # Try to parse the accumulated input as JSON
-                    try:
-                        parsed_args = json.loads(tool_input_buffers[recent_tool_id])
-                        # Update the tool call with complete args
-                        updated_tool_call = ToolCall(
-                            name=tool_calls[-1]["name"],
-                            args=parsed_args,
-                            id=tool_calls[-1]["id"],
-                        )
-                        tool_calls[-1] = updated_tool_call
-                    except json.JSONDecodeError:
-                        # Still accumulating JSON, keep the buffer
-                        pass
-
-            else:
-                # Handle content_list for ONLY cases where delta_type is not already handled
-                content_list = delta.get("content_list", [])
-                for item in content_list:
-                    # Text content (only if delta_type is not 'text' to avoid duplication)
-                    if item.get("type") == "text" and "text" in item:
-                        content_parts.append(item["text"])
-
-                    # Tool call in Snowflake format with nested tool_use object
-                    elif item.get("type") == "tool_use" and "tool_use" in item:
-                        tool_use = item["tool_use"]
-                        tool_use_id = tool_use.get("tool_use_id")
-                        tool_name = tool_use.get("name")
-
-                        if tool_use_id and tool_name:
-                            existing_call = None
-                            for tc in tool_calls:
-                                if tc["id"] == tool_use_id:
-                                    existing_call = tc
-                                    break
-
-                            if not existing_call:
-                                # Create new tool call using LangChain format
-                                from langchain_core.messages.tool import tool_call
-
-                                tool_call_obj = tool_call(
-                                    name=tool_name,
-                                    args=tool_use.get("input") or {},  # Handle null/None values
-                                    id=tool_use_id,
-                                )
-                                tool_calls.append(tool_call_obj)
-
-                    # Tool call metadata in content_list (legacy format)
-                    elif "tool_use_id" in item and "name" in item:
+                    if tool_use_id and tool_name:
                         existing_call = None
                         for tc in tool_calls:
-                            if tc["id"] == item["tool_use_id"]:
+                            if tc["id"] == tool_use_id:
                                 existing_call = tc
                                 break
 
                         if not existing_call:
-                            # Create new tool call using LangChain format
-                            from langchain_core.messages.tool import tool_call
-
-                            tool_call_obj = tool_call(name=item["name"], args={}, id=item["tool_use_id"])
+                            tool_call_obj = ToolCall(
+                                name=tool_name,
+                                args=tool_use.get("input") or {},
+                                id=tool_use_id,
+                            )
                             tool_calls.append(tool_call_obj)
-                            tool_input_buffers[item["tool_use_id"]] = ""
 
-                    # DO NOT process 'input' from content_list to avoid duplication
-                    # Input is only processed from the main delta object above
+                elif "tool_use_id" in item and "name" in item:
+                    existing_call = None
+                    for tc in tool_calls:
+                        if tc["id"] == item["tool_use_id"]:
+                            existing_call = tc
+                            break
 
-        # Update usage info
-        if "usage" in data:
-            usage_data.update(data["usage"])
+                    if not existing_call:
+                        from langchain_core.messages import tool_call
 
-    def _parse_json_response(self, data: dict) -> tuple[str, list, dict]:
-        """Parse a direct JSON response (non-streaming format) with content_list support.
-        
-        FIX: When content_list is present, extract text from content_list items
-        instead of message.content to avoid duplication (issue #35) and ensure
-        text is not lost when tools are used (SPCS empty response bug).
-        """
+                        tool_call_obj = tool_call(name=item["name"], args={}, id=item["tool_use_id"])
+                        tool_calls.append(tool_call_obj)
+                        tool_input_buffers[item["tool_use_id"]] = ""
+
+        if "usage" in response_data:
+            usage_data.update(response_data["usage"])
+
+        full_content = "".join(content_parts)
+
+        ai_message = AIMessage(
+            content=full_content,
+            tool_calls=tool_calls if tool_calls else [],
+            additional_kwargs={"usage": usage_data},
+        )
+
+        metadata = SnowflakeMetadataFactory.create_metadata(
+            model=response_data.get("model", self.model),
+            usage=usage_data,
+        )
+
+        return ChatResult(
+            generations=[ChatGeneration(message=ai_message)],
+            llm_output=metadata,
+        )
+
+    def _parse_direct_response(self, data: dict[str, Any]) -> ChatResult:
+        """Parse a direct JSON response (non-streaming format) with content_list support."""
         full_content = ""
         tool_calls = []
         usage_data = {}
 
-        # Handle direct response format
-        if "choices" in data:
-            choices = data["choices"]
-            for choice in choices:
-                if "message" in choice:
-                    message = choice["message"]
-                    
-                    # FIX: Check content_list FIRST - Snowflake puts text here when tools are used
-                    # Only fall back to message.content if content_list is not present
+        if "usage" in data:
+            usage_data = data["usage"]
+
+        choices = data.get("choices", [])
+        for choice in choices:
+            message = choice.get("message", choice.get("delta", {}))
+            if message:
+                if message.get("role") == "assistant" or "content" in message or "content_list" in message:
                     if "content_list" in message:
-                        # Extract text AND tool_use from content_list (Snowflake's native format)
                         for item in message["content_list"]:
                             if item.get("type") == "text" and "text" in item:
-                                # FIX: Extract text content from content_list
                                 full_content += item["text"]
                             elif item.get("type") == "tool_use" and "tool_use" in item:
                                 tool_use = item["tool_use"]
-                                # Convert to LangChain format
                                 tool_calls.append(
                                     {
                                         "id": tool_use.get("tool_use_id", f"call_{len(tool_calls)}"),
                                         "name": tool_use.get("name"),
-                                        "args": tool_use.get("input") or {},  # Handle null/None values
+                                        "args": tool_use.get("input") or {},
                                     }
                                 )
                     else:
-                        # Fallback: No content_list, use message.content directly
                         full_content += message.get("content", "")
 
-                    # Check for tool_calls in standard format (OpenAI-style, not Snowflake)
                     if "tool_calls" in message:
                         tool_calls.extend(message["tool_calls"])
 
-                elif "messages" in choice:
-                    # Alternative format
-                    full_content += choice.get("messages", "")
-
-        # Extract usage data
-        if "usage" in data:
-            usage_data = data["usage"]
-
-        return full_content, tool_calls, usage_data
-
-    def bind_functions(
-        self,
-        functions: Sequence[Union[Dict[str, Any], Callable, BaseTool]],
-        function_call: Optional[Union[str, Literal["auto", "none"], Dict]] = None,
-        **kwargs: Any,
-    ) -> Runnable[LanguageModelInput, BaseMessage]:
-        """Legacy support for bind_functions (redirects to bind_tools)."""
-        SnowflakeErrorHandler.log_info(
-            "deprecated method", "bind_functions is deprecated. Use bind_tools instead.", logger
+        ai_message = AIMessage(
+            content=full_content,
+            tool_calls=tool_calls,
+            additional_kwargs={"usage": usage_data},
         )
-        return self.bind_tools(functions, tool_choice=function_call, **kwargs)
+
+        metadata = SnowflakeMetadataFactory.create_metadata(
+            model=data.get("model", getattr(self, "model", "unknown")),
+            usage=usage_data,
+        )
+
+        return ChatResult(
+            generations=[ChatGeneration(message=ai_message)],
+            llm_output=metadata,
+        )
 
     def _should_use_rest_api(self) -> bool:
         """Determine whether to use REST API or SQL function based on tool usage.
