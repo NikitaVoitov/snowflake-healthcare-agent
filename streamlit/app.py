@@ -216,7 +216,6 @@ for message in st.session_state.messages:
                 col1, col2 = st.columns(2)
                 with col1:
                     st.metric("Tools Used", tools_used or "None")
-                    st.metric("Errors", metadata.get("error_count", 0))
                 with col2:
                     st.caption(f"Execution ID: {metadata.get('execution_id', 'N/A')}")
 
@@ -314,7 +313,6 @@ if prompt := st.chat_input("Ask about your healthcare coverage..."):
                 "metadata": {
                     "routing": result.get("routing"),
                     "execution_id": result.get("executionId"),
-                    "error_count": result.get("errorCount", 0),
                     "analyst_results": result.get("analystResults"),
                     "search_results": result.get("searchResults"),
                 }
