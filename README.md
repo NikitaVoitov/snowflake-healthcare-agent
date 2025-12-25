@@ -251,6 +251,7 @@ healthcare/
 | **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
 | **SPCS OAuth** | Automatic `Snowflake Token` authentication via session |
+| **Modern Error Handling** | Native LangGraph `RetryPolicy` with automatic retries for transient failures |
 
 ---
 
@@ -332,13 +333,13 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 
 ```bash
 # Build Docker image for linux/amd64 (Distroless)
-docker buildx build --platform linux/amd64 -t healthcare-agent:1.0.80 .
+docker buildx build --platform linux/amd64 -t healthcare-agent:1.0.81 .
 
 # Tag and push to Snowflake registry
 REGISTRY="your-account.registry.snowflakecomputing.com"
-docker tag healthcare-agent:1.0.80 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.80
+docker tag healthcare-agent:1.0.81 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.81
 snow spcs image-registry login -c <your_connection_name>
-docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.80
+docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.81
 
 # Deploy service
 snow sql -c <your_connection_name> --filename scripts/sql/08_spcs_deploy.sql
