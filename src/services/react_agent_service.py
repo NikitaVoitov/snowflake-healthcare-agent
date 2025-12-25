@@ -80,10 +80,6 @@ class AgentService:
             execution_id=execution_id,
             # Output
             final_answer=None,
-            # Error handling
-            error_count=0,
-            last_error=None,
-            has_error=False,
         )
 
     async def _load_conversation_history(
@@ -180,8 +176,6 @@ class AgentService:
             routing=routing,
             execution_id=thread_id,
             checkpoint_id=checkpoint_id,
-            error_count=result.get("error_count", 0),
-            last_error=result.get("last_error"),
             analyst_results=self._extract_analyst_results(messages),
             search_results=self._extract_search_results(messages),
         )
