@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.80 (Dec 2024) - Fixed analyst/search results extraction using tool_call_id matching
+-- Current version: v1.0.81 (Dec 2024) - Modern error handling with RetryPolicy, fixed ChatSnowflake streaming
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
@@ -54,12 +54,12 @@ CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 0
-    COMMENT = 'Healthcare ReAct Agent v1.0.80 - Fixed analyst/search results extraction'
+    COMMENT = 'Healthcare ReAct Agent v1.0.81 - Modern error handling with RetryPolicy'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:1.0.80
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:1.0.81
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
@@ -144,7 +144,7 @@ GRANT USAGE ON FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR
 -- -----------------------------------------------------------------------------
 /*
 # VERSION: Update this for each deployment
-export VERSION=1.0.80
+export VERSION=1.0.81
 export REGISTRY=cisco-splunkincubation.registry.snowflakecomputing.com
 
 # 1. Build for linux/amd64 (required for SPCS)
