@@ -1,7 +1,17 @@
 """FastAPI application entry point for Healthcare Multi-Agent API."""
 
 import logging
+import warnings
 from contextlib import asynccontextmanager
+
+# Suppress known warning from third-party langchain-snowflake package
+# This is a harmless Pydantic field shadowing warning in their code
+warnings.filterwarnings(
+    "ignore",
+    message='Field name "schema" in "ChatSnowflake" shadows an attribute',
+    category=UserWarning,
+    module="langchain_snowflake",
+)
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
