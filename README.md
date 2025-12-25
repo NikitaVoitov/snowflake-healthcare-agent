@@ -38,64 +38,51 @@ All within Snowflake's secure environment using official `langchain-snowflake` i
 ### ReAct Workflow
 
 ```mermaid
-flowchart TD
-    subgraph snowsight["Snowsight"]
+flowchart TB
+ subgraph snowsight["Snowsight"]
         StreamlitApp["Native Streamlit App"]
         ServiceFunction["HEALTHCARE_AGENT_QUERY Function"]
-    end
-
-    subgraph spcs["SPCS Container - v1.0.80 (Distroless)"]
+  end
+ subgraph react_graph["LangGraph ReAct Workflow"]
+        ModelNode["ChatSnowflake + Tools"]
+        Router{"route_after_model"}
+        ToolNode["Execute tools"]
+        FinalAnswer["Generate response"]
+  end
+ subgraph spcs["SPCS Container"]
         FastAPI["FastAPI + uvicorn"]
         ReactService["ReActAgentService"]
-        
-        subgraph react_graph["LangGraph ReAct Workflow"]
-            ModelNode["model_node<br/>ChatSnowflake + Tools"]
-            Router{route_after_model}
-            ToolNode["tool_node<br/>Execute tools"]
-            FinalAnswer["final_answer_node<br/>Generate response"]
-        end
-        
-        Checkpointer["SnowflakeSaver<br/>Conversation Memory"]
-    end
-
-    subgraph langchain["langchain-snowflake (patched)"]
-        ChatSnowflake["ChatSnowflake<br/>claude-3-5-sonnet"]
-        CortexAnalyst["SnowflakeCortexAnalyst<br/>NL→SQL"]
-        CortexRetriever["SnowflakeCortexSearchRetriever<br/>REST API"]
-    end
-
-    subgraph cortex["Cortex Services"]
-        CortexREST["Cortex REST API<br/>/api/v2/cortex/inference:complete"]
-        AnalystREST["Cortex Analyst REST API<br/>/api/v2/cortex/analyst/message"]
-        CortexSearch["SnowflakeCortexSearchRetriever<br/>REST API"]
-    end
-
-    subgraph db["HEALTHCARE_DB"]
+        react_graph
+        Checkpointer["SnowflakeSaver<br>Conversation Memory"]
+  end
+ subgraph langchain["langchain-snowflake"]
+        ChatSnowflake["ChatSnowflake<br>claude-3-5-sonnet"]
+        CortexAnalyst["SnowflakeCortexAnalyst<br>NL→SQL"]
+        CortexRetriever["SnowflakeCortexSearchRetriever<br>REST API"]
+  end
+ subgraph cortex["Cortex Services"]
+        CortexREST["Cortex REST API<br>/api/v2/cortex/inference:complete"]
+        AnalystREST["Cortex Analyst REST API<br>/api/v2/cortex/analyst/message"]
+        CortexSearch["SnowflakeCortexSearchRetriever<br>REST API"]
+  end
+ subgraph db["HEALTHCARE_DB"]
         SemanticModel["Semantic Model YAML"]
         MemberData["CALL_CENTER_MEMBER_DENORMALIZED"]
         KnowledgeData["FAQs / Policies / Transcripts"]
-    end
-
-    StreamlitApp -->|HTTP POST| ServiceFunction
+  end
+    StreamlitApp -- <br> --> ServiceFunction
     ServiceFunction --> FastAPI
     FastAPI --> ReactService
     ReactService --> react_graph
-    
-    ModelNode --> Router
-    Router -->|tool_calls| ToolNode
-    Router -->|no tools| FinalAnswer
-    
-    ToolNode -->|loop| ModelNode
+    ModelNode --> Router & ChatSnowflake
+    Router -- <br> --> ToolNode & FinalAnswer
+    ToolNode -- loop --> ModelNode
     FinalAnswer --> Checkpointer
-    
-    ModelNode --> ChatSnowflake
     ChatSnowflake --> CortexREST
-    ToolNode -->|query_member_data| CortexAnalyst
-    ToolNode -->|search_knowledge| CortexRetriever
+    ToolNode -- <br> --> CortexAnalyst & CortexRetriever
     CortexRetriever --> CortexSearch
     CortexAnalyst --> AnalystREST
-    AnalystREST --> SemanticModel
-    AnalystREST --> MemberData
+    AnalystREST --> SemanticModel & MemberData
     CortexSearch --> KnowledgeData
 ```
 
