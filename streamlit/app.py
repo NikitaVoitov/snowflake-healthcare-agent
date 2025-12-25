@@ -459,14 +459,21 @@ def handle_streaming_response(
                 progress_steps.append(("result", f"📥 Got results: {result_preview[:30]}..."))
 
             elif event_type == "react_answer":
-                answer = data.get("answer", "") or data.get("answer_preview", "")
-                if answer and not answer_displayed:
-                    final_result["output"] = answer
-                    # Display answer IMMEDIATELY - don't wait for complete event
+                # Only display FULL answer from final_answer node, not truncated preview
+                full_answer = data.get("answer", "")  # Only from final_answer node
+                preview = data.get("answer_preview", "")  # Truncated from model node
+                
+                if full_answer and not answer_displayed:
+                    # This is the FULL answer from final_answer node - display it!
+                    final_result["output"] = full_answer
                     status_container.empty()
-                    response_container.markdown(answer)
+                    response_container.markdown(full_answer)
                     answer_displayed = True
                     progress_steps.append(("complete", "✅ Answer ready"))
+                elif preview and not answer_displayed:
+                    # This is just a preview - show status but don't display yet
+                    status_container.info("✍️ Generating final answer...")
+                    final_result["output"] = preview  # Store preview as fallback
 
             elif event_type == "complete":
                 status_container.empty()  # Clear status (if not already cleared)
