@@ -407,9 +407,12 @@ def handle_streaming_response(
     member_id: str | None,
     execution_id: str | None,
     status_container,
-    response_container,  # noqa: ARG001
+    response_container,
 ) -> dict:
-    """Handle streaming response with real-time progress updates."""
+    """Handle streaming response with real-time progress updates.
+    
+    Shows the answer IMMEDIATELY when received, without waiting for complete event.
+    """
     endpoint_url = get_service_endpoint_url()
 
     if not endpoint_url:
@@ -418,6 +421,7 @@ def handle_streaming_response(
         return call_agent_service_sync(query, member_id, execution_id)
 
     progress_steps = []
+    answer_displayed = False
     final_result = {
         "output": "",
         "routing": "",
@@ -456,13 +460,16 @@ def handle_streaming_response(
 
             elif event_type == "react_answer":
                 answer = data.get("answer", "") or data.get("answer_preview", "")
-                if answer:
+                if answer and not answer_displayed:
                     final_result["output"] = answer
-                    status_container.success("✅ Final answer ready!")
+                    # Display answer IMMEDIATELY - don't wait for complete event
+                    status_container.empty()
+                    response_container.markdown(answer)
+                    answer_displayed = True
                     progress_steps.append(("complete", "✅ Answer ready"))
 
             elif event_type == "complete":
-                status_container.empty()  # Clear status
+                status_container.empty()  # Clear status (if not already cleared)
                 # Extract routing and results from complete event
                 if data.get("routing"):
                     final_result["routing"] = data["routing"]
@@ -496,6 +503,8 @@ def handle_streaming_response(
         # Fallback to sync
         return call_agent_service_sync(query, member_id, execution_id)
 
+    # Mark that answer was already displayed so caller doesn't duplicate
+    final_result["_answer_displayed"] = answer_displayed
     return final_result
 
 
@@ -534,10 +543,11 @@ if prompt := st.chat_input("Ask about your healthcare coverage..."):
 
         response_text = result.get("output", "No response received.")
 
-        # Handle errors
+        # Handle errors or display answer (if not already displayed by streaming)
         if result.get("error"):
             st.error(response_text)
-        else:
+        elif not result.get("_answer_displayed"):
+            # Only display if streaming didn't already show it
             st.markdown(response_text)
 
         # Store message with metadata
