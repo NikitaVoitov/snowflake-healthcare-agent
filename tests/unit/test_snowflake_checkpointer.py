@@ -1,18 +1,17 @@
 """Unit tests for CustomAsyncSnowflakeSaver checkpointer."""
 
-import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.services.snowflake_checkpointer import (
-    AsyncCursor,
-    CustomAsyncSnowflakeSaver,
     MIGRATIONS,
     SELECT_CHECKPOINT_SQL,
     UPSERT_CHECKPOINT_BLOBS_SQL,
     UPSERT_CHECKPOINTS_SQL,
+    AsyncCursor,
+    CustomAsyncSnowflakeSaver,
 )
 
 
@@ -70,7 +69,7 @@ class TestAsyncCursor:
         await async_cursor.close()
         mock_sync_cursor.close.assert_called_once()
 
-    def test_getattr_delegates_to_sync(self, async_cursor, mock_sync_cursor):
+    def test_getattr_delegates_to_sync(self, async_cursor, mock_sync_cursor):  # noqa: ARG002
         """Test attribute access delegates to sync cursor."""
         assert async_cursor.sfqid == "test-query-id"
 
@@ -171,9 +170,7 @@ class TestCustomAsyncSnowflakeSaver:
         with patch.object(checkpointer, "serde") as mock_serde:
             mock_serde.dumps_typed.return_value = ("json", b'{"test": 1}')
             writes = [("channel1", {"test": 1})]
-            result = checkpointer._dump_writes(
-                "thread1", "ns", "cp1", "task1", writes
-            )
+            result = checkpointer._dump_writes("thread1", "ns", "cp1", "task1", writes)
             assert len(result) == 1
             # Tuple order: thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob
             assert result[0][0] == "thread1"  # thread_id
@@ -315,17 +312,19 @@ class TestCheckpointerConnectionFactory:
             mock_file.__enter__ = MagicMock(return_value=MagicMock(read=MagicMock(return_value=b"key-data")))
             mock_file.__exit__ = MagicMock(return_value=False)
 
-            with patch("builtins.open", return_value=mock_file):
-                with patch(
+            with (
+                patch("builtins.open", return_value=mock_file),
+                patch(
                     "cryptography.hazmat.primitives.serialization.load_pem_private_key",
                     return_value=mock_key,
-                ):
-                    conn = CustomAsyncSnowflakeSaver.create_connection()
+                ),
+            ):
+                CustomAsyncSnowflakeSaver.create_connection()
 
-                    mock_connect.assert_called_once()
-                    call_kwargs = mock_connect.call_args[1]
-                    assert call_kwargs["account"] == "test-account"
-                    assert call_kwargs["user"] == "test-user"
+                mock_connect.assert_called_once()
+                call_kwargs = mock_connect.call_args[1]
+                assert call_kwargs["account"] == "test-account"
+                assert call_kwargs["user"] == "test-user"
 
     @patch("src.services.snowflake_checkpointer.is_running_in_spcs")
     @patch("src.services.snowflake_checkpointer.Path")
@@ -345,10 +344,9 @@ class TestCheckpointerConnectionFactory:
             mock_settings.snowflake_database = "TEST_DB"
             mock_settings.snowflake_warehouse = "TEST_WH"
 
-            conn = CustomAsyncSnowflakeSaver.create_connection()
+            CustomAsyncSnowflakeSaver.create_connection()
 
             mock_connect.assert_called_once()
             call_kwargs = mock_connect.call_args[1]
             assert call_kwargs["authenticator"] == "oauth"
             assert call_kwargs["token"] == "oauth-token-123"
-
