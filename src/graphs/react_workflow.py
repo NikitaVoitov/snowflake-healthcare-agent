@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import Literal
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -152,6 +152,7 @@ async def _initialize_snowpark_session_async() -> None:
     # Create session asynchronously (blocking network call)
     def _create_session_sync(params):
         from snowflake.snowpark import Session
+
         return Session.builder.configs(params).create()
 
     try:
@@ -244,10 +245,10 @@ async def model_node(state: HealthcareAgentState) -> ModelOutput:
         }
 
     # Get ChatSnowflake with tools bound (ASYNC)
-    
+
     llm = await get_chat_snowflake(tools=HEALTHCARE_TOOLS)
     logger.info("ChatSnowflake created, tools=%s", len(HEALTHCARE_TOOLS))
-    
+
     # DEBUG: Log bound tools count
     if hasattr(llm, "_bound_tools"):
         tool_count = len(llm._bound_tools) if llm._bound_tools else 0
@@ -257,7 +258,7 @@ async def model_node(state: HealthcareAgentState) -> ModelOutput:
 
     # Build messages for LLM
     messages = _build_chat_messages(state)
-    
+
     # DEBUG: Log messages being sent
     logger.info("Messages count: %d, types: %s", len(messages), [type(m).__name__ for m in messages])
 
@@ -278,7 +279,7 @@ async def model_node(state: HealthcareAgentState) -> ModelOutput:
             content_len,
             (ai_message.content[:200] if ai_message.content else "EMPTY")[:200],
         )
-        
+
         # Log additional debugging info if response is empty
         if content_len == 0 and not has_tool_calls:
             logger.warning(
