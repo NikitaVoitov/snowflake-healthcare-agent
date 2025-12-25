@@ -9,12 +9,20 @@ Both environments use langchain-snowflake ChatSnowflake, but with patched versio
 
 SPCS MODE: Session-only auth triggers correct 'Snowflake Token="{token}"' format.
 LOCAL MODE: Key pair auth with private_key_path for REST API tool calling.
+
+STREAMING:
+- By default, streaming is disabled (disable_streaming=True) to avoid
+  "No generations found in stream" errors when tools are bound.
+- To enable streaming (after applying langchain-snowflake patches), set:
+  ENABLE_LLM_STREAMING=true
+- See patches/README.md for how to apply the streaming patches.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,6 +30,10 @@ from langchain_core.language_models import BaseChatModel
 from langchain_snowflake import ChatSnowflake
 
 from src.config import settings
+
+# Check if streaming should be enabled (requires langchain-snowflake patches)
+# Set ENABLE_LLM_STREAMING=true to enable token-level streaming
+ENABLE_LLM_STREAMING = os.getenv("ENABLE_LLM_STREAMING", "false").lower() == "true"
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
@@ -162,9 +174,9 @@ async def _create_spcs_chat_model(model: str, temperature: float) -> ChatSnowfla
         session=session,
         model=model,
         temperature=temperature,
-        # Disable streaming to avoid langchain-core falling back to _astream
-        # which fails with "No generations found in stream" error
-        disable_streaming=True,
+        # Disable streaming by default to avoid "No generations found in stream" error
+        # Set ENABLE_LLM_STREAMING=true after applying langchain-snowflake patches
+        disable_streaming=not ENABLE_LLM_STREAMING,
     )
 
 
@@ -309,9 +321,9 @@ async def _create_local_chat_model(model: str, temperature: float) -> ChatSnowfl
         # Database context
         database=settings.snowflake_database,
         warehouse=settings.snowflake_warehouse,
-        # Disable streaming to avoid langchain-core falling back to _astream
-        # which fails with "No generations found in stream" error
-        disable_streaming=True,
+        # Disable streaming by default to avoid "No generations found in stream" error
+        # Set ENABLE_LLM_STREAMING=true after applying langchain-snowflake patches
+        disable_streaming=not ENABLE_LLM_STREAMING,
     )
 
 

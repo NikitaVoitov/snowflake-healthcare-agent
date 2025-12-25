@@ -52,6 +52,11 @@ COPY patches/langchain_snowflake_rest_client_patched.py \
     /app/.venv/lib/python3.11/site-packages/langchain_snowflake/_connection/rest_client.py
 COPY patches/langchain_snowflake_tools_patched.py \
     /app/.venv/lib/python3.11/site-packages/langchain_snowflake/chat_models/tools.py
+# NEW: Streaming patches for token-level streaming with tools
+COPY patches/langchain_snowflake_streaming_patched.py \
+    /app/.venv/lib/python3.11/site-packages/langchain_snowflake/chat_models/streaming.py
+COPY patches/langchain_snowflake_base_patched.py \
+    /app/.venv/lib/python3.11/site-packages/langchain_snowflake/chat_models/base.py
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Google Distroless (METHOD 1: minimal, secure, 53MB base)

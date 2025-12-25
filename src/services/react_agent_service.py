@@ -412,3 +412,190 @@ class AgentService:
                 node="react_workflow",
                 data={"message": str(exc)},
             )
+
+    async def stream_tokens(
+        self,
+        request: QueryRequest,
+        checkpointer: BaseCheckpointSaver | None = None,  # noqa: ARG002
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream agent execution with token-level granularity.
+
+        Uses LangGraph's astream_events API to capture:
+        - Token-by-token LLM streaming (when patches applied)
+        - Tool call progress (name, partial args)
+        - Tool results
+        - Final answer
+
+        This requires the langchain-snowflake streaming patches to work properly.
+
+        Args:
+            request: Validated query request.
+            checkpointer: Optional LangGraph checkpointer.
+
+        Yields:
+            StreamEvent for each token, tool call, and completion.
+        """
+        if not request.query.strip():
+            yield StreamEvent(
+                event_type="error",
+                data={"message": "Query cannot be empty"},
+            )
+            return
+
+        is_continuation = request.thread_id is not None
+        thread_id = request.thread_id or self._build_thread_id(request.tenant_id, request.user_id)
+        config = {"configurable": {"thread_id": thread_id}}
+        initial_state = self._build_initial_state(request, thread_id)
+
+        # Load conversation history if continuing
+        if is_continuation and hasattr(self.graph, "checkpointer"):
+            try:
+                history = await self._load_conversation_history(self.graph.checkpointer, config)
+                if history:
+                    initial_state["conversation_history"] = history
+            except Exception as exc:
+                logger.warning(f"Could not load history for token streaming: {exc}")
+
+        logger.info(f"Token streaming agent workflow: {thread_id}")
+
+        # Emit start event
+        yield StreamEvent(
+            event_type="node_start",
+            node="react_workflow",
+            data={"thread_id": thread_id, "query": request.query, "is_continuation": is_continuation},
+        )
+
+        all_messages: list = []
+        accumulated_content = ""
+        current_tool_name = ""
+        current_tool_args = ""
+
+        try:
+            # Use astream_events for fine-grained streaming
+            async for event in self.graph.astream_events(initial_state, config=config, version="v2"):
+                event_kind = event.get("event", "")
+                event_data = event.get("data", {})
+                event_name = event.get("name", "")
+
+                # Token-level streaming from LLM
+                if event_kind == "on_chat_model_stream":
+                    chunk = event_data.get("chunk")
+                    if chunk:
+                        # Text content token
+                        if hasattr(chunk, "content") and chunk.content:
+                            accumulated_content += chunk.content
+                            yield StreamEvent(
+                                event_type="token",
+                                node="model",
+                                data={"content": chunk.content, "accumulated": accumulated_content},
+                            )
+
+                        # Tool call chunks (from patched langchain-snowflake)
+                        # Can be ToolCallChunk objects OR dicts depending on LangChain version
+                        if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
+                            for tc_chunk in chunk.tool_call_chunks:
+                                # Handle both dict and object formats
+                                tc_name = tc_chunk.get("name") if isinstance(tc_chunk, dict) else getattr(tc_chunk, "name", None)
+                                tc_args = tc_chunk.get("args") if isinstance(tc_chunk, dict) else getattr(tc_chunk, "args", None)
+                                tc_id = tc_chunk.get("id") if isinstance(tc_chunk, dict) else getattr(tc_chunk, "id", None)
+                                
+                                if tc_name:
+                                    current_tool_name = tc_name
+                                    yield StreamEvent(
+                                        event_type="tool_call_start",
+                                        node="model",
+                                        data={"tool_name": current_tool_name, "tool_id": tc_id},
+                                    )
+                                if tc_args:
+                                    current_tool_args += tc_args
+                                    yield StreamEvent(
+                                        event_type="tool_call_args",
+                                        node="model",
+                                        data={
+                                            "tool_name": current_tool_name,
+                                            "partial_args": tc_args,
+                                            "accumulated_args": current_tool_args,
+                                        },
+                                    )
+
+                # Chat model finished (tool call complete or response done)
+                elif event_kind == "on_chat_model_end":
+                    output = event_data.get("output")
+                    if output and hasattr(output, "tool_calls") and output.tool_calls:
+                        # Tool call completed
+                        for tool_call in output.tool_calls:
+                            yield StreamEvent(
+                                event_type="tool_call_complete",
+                                node="model",
+                                data={
+                                    "tool_name": tool_call.get("name", ""),
+                                    "tool_id": tool_call.get("id", ""),
+                                    "args": tool_call.get("args", {}),
+                                },
+                            )
+                        # Reset for next tool call
+                        current_tool_name = ""
+                        current_tool_args = ""
+                    elif output and hasattr(output, "content") and output.content:
+                        # Final answer
+                        if not current_tool_name:  # Not during tool calling
+                            yield StreamEvent(
+                                event_type="react_answer",
+                                node="model",
+                                data={"answer": output.content},
+                            )
+
+                # Tool execution started
+                elif event_kind == "on_tool_start":
+                    yield StreamEvent(
+                        event_type="tool_executing",
+                        node="tools",
+                        data={"tool_name": event_name, "input": str(event_data.get("input", ""))[:200]},
+                    )
+
+                # Tool execution completed
+                elif event_kind == "on_tool_end":
+                    tool_output = event_data.get("output", "")
+                    if isinstance(tool_output, ToolMessage):
+                        all_messages.append(tool_output)
+                        tool_output = tool_output.content
+                    yield StreamEvent(
+                        event_type="tool_result",
+                        node="tools",
+                        data={"tool_name": event_name, "result_preview": str(tool_output)[:300]},
+                    )
+
+                # Node transitions
+                elif event_kind == "on_chain_end" and event_name == "final_answer":
+                    final_answer = event_data.get("output", {}).get("final_answer", "")
+                    if final_answer:
+                        yield StreamEvent(
+                            event_type="react_answer",
+                            node="final_answer",
+                            data={"answer": final_answer},
+                        )
+
+            # Extract final results
+            tools_used = self._extract_tools_from_messages(all_messages)
+            routing = self._determine_routing(tools_used)
+            analyst_results = self._extract_analyst_results(all_messages)
+            search_results = self._extract_search_results(all_messages)
+
+            yield StreamEvent(
+                event_type="complete",
+                node="react_workflow",
+                data={
+                    "thread_id": thread_id,
+                    "routing": routing,
+                    "analyst_results": analyst_results,
+                    "search_results": search_results,
+                },
+            )
+
+        except Exception as exc:
+            logger.error(f"Token stream error: {exc}", exc_info=True)
+            yield StreamEvent(
+                event_type="error",
+                node="react_workflow",
+                data={"message": str(exc)},
+            )

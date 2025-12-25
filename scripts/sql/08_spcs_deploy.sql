@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.82 (Dec 2024) - SSE streaming support, Container Runtime for Streamlit
+-- Current version: v1.0.84 (Dec 2024) - Token streaming patches, ToolCallChunk support
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
@@ -47,19 +47,19 @@ DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
 -- -----------------------------------------------------------------------------
 -- Step 4: Create the SPCS Service
 -- -----------------------------------------------------------------------------
--- WORKING version - SSE streaming + Container Runtime support (v1.0.82)
+-- WORKING version - Token streaming patches + ToolCallChunk support (v1.0.84)
 CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     IN COMPUTE POOL AGENTS_POOL
     EXTERNAL_ACCESS_INTEGRATIONS = (HEALTHCARE_EXTERNAL_ACCESS)
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 0
-    COMMENT = 'Healthcare ReAct Agent v1.0.82 - SSE streaming support for Container Runtime'
+    COMMENT = 'Healthcare ReAct Agent v1.0.84 - Token streaming patches, ToolCallChunk support'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:1.0.82
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:1.0.84
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
@@ -71,6 +71,8 @@ spec:
         CORTEX_LLM_MODEL: "claude-3-5-sonnet"
         # Enable ReAct workflow (Reasoning + Acting with conversation memory)
         USE_REACT_WORKFLOW: "true"
+        # Enable LLM streaming (requires langchain-snowflake patches)
+        ENABLE_LLM_STREAMING: "true"
       resources:
         requests:
           memory: 2Gi
@@ -144,7 +146,7 @@ GRANT USAGE ON FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR
 -- -----------------------------------------------------------------------------
 /*
 # VERSION: Update this for each deployment
-export VERSION=1.0.81
+export VERSION=1.0.84
 export REGISTRY=cisco-splunkincubation.registry.snowflakecomputing.com
 
 # 1. Build for linux/amd64 (required for SPCS)

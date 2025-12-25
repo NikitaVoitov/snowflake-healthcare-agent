@@ -164,19 +164,25 @@ def stream_agent_response(
     query: str,
     member_id: str | None,
     execution_id: str | None,
+    use_token_streaming: bool = False,
 ) -> Generator[dict, None, None]:
-    """Stream agent events via SSE from the /agents/stream endpoint.
+    """Stream agent events via SSE from the agent streaming endpoints.
 
     Args:
         endpoint_url: Base URL of the SPCS service
         query: User query
         member_id: Optional member ID
         execution_id: Thread ID for conversation continuation
+        use_token_streaming: If True, use /agents/stream-tokens for token-level events
 
     Yields:
         Parsed event dictionaries
     """
-    url = f"{endpoint_url}/agents/stream"
+    # Choose endpoint based on streaming mode
+    if use_token_streaming:
+        url = f"{endpoint_url}/agents/stream-tokens"
+    else:
+        url = f"{endpoint_url}/agents/stream"
 
     payload = {
         "query": query,
@@ -273,6 +279,16 @@ with st.sidebar:
         value=st.session_state.use_streaming,
         help="Show real-time agent progress (tool calls, thinking, etc.)",
     )
+
+    # Token-level streaming (experimental)
+    if st.session_state.use_streaming:
+        st.session_state.use_token_streaming = st.checkbox(
+            "🧪 Token streaming (experimental)",
+            value=st.session_state.get("use_token_streaming", False),
+            help="Stream response token-by-token like ChatGPT. Requires patched langchain-snowflake.",
+        )
+    else:
+        st.session_state.use_token_streaming = False
 
     # Clear chat
     if st.button("🗑️ Clear Chat", use_container_width=True):
@@ -408,10 +424,24 @@ def handle_streaming_response(
     execution_id: str | None,
     status_container,
     response_container,
+    use_token_streaming: bool = False,
 ) -> dict:
     """Handle streaming response with real-time progress updates.
-    
-    Shows the answer IMMEDIATELY when received, without waiting for complete event.
+
+    Supports two streaming modes:
+    1. Node-level streaming (default): Shows progress per node transition
+    2. Token-level streaming: Shows token-by-token output and tool call progress
+
+    Args:
+        query: User query
+        member_id: Optional member ID
+        execution_id: Thread ID for conversation continuation
+        status_container: Streamlit container for status messages
+        response_container: Streamlit container for response text
+        use_token_streaming: If True, use token-level streaming (requires patches)
+
+    Returns:
+        Result dictionary with output, routing, and metadata
     """
     endpoint_url = get_service_endpoint_url()
 
@@ -422,6 +452,8 @@ def handle_streaming_response(
 
     progress_steps = []
     answer_displayed = False
+    streaming_text = ""  # Accumulated text for token streaming
+    current_tool_name = ""
     final_result = {
         "output": "",
         "routing": "",
@@ -431,10 +463,11 @@ def handle_streaming_response(
     }
 
     try:
-        for event in stream_agent_response(endpoint_url, query, member_id, execution_id):
+        for event in stream_agent_response(endpoint_url, query, member_id, execution_id, use_token_streaming):
             event_type = event.get("event_type", "")
             data = event.get("data", {})
 
+            # === Node-level events (original) ===
             if event_type == "node_start":
                 final_result["executionId"] = data.get("thread_id", final_result["executionId"])
                 status_container.info("🚀 Starting agent workflow...")
@@ -458,26 +491,80 @@ def handle_streaming_response(
                 status_container.success("📥 Tool returned results")
                 progress_steps.append(("result", f"📥 Got results: {result_preview[:30]}..."))
 
+            # === Token-level events (new - requires patches) ===
+            elif event_type == "token":
+                # Token-by-token streaming from LLM
+                content = data.get("content", "")
+                if content:
+                    streaming_text += content
+                    # Update the response in real-time (token by token!)
+                    response_container.markdown(streaming_text + "▌")  # Cursor effect
+                    if not answer_displayed:
+                        status_container.info("✍️ Generating response...")
+
+            elif event_type == "tool_call_start":
+                # Tool call starting
+                tool_name = data.get("tool_name", "")
+                current_tool_name = tool_name
+                tool_emoji = "📊" if "member" in tool_name.lower() or "analyst" in tool_name.lower() else "🔎"
+                status_container.info(f"🔧 Calling tool: {tool_emoji} **{tool_name}**")
+                progress_steps.append(("tool_start", f"🔧 Tool: {tool_name}"))
+
+            elif event_type == "tool_call_args":
+                # Partial tool arguments streaming
+                partial_args = data.get("partial_args", "")
+                accumulated = data.get("accumulated_args", "")
+                if current_tool_name and accumulated:
+                    # Show building progress
+                    status_container.info(f"📝 Building {current_tool_name} args: {accumulated[:50]}...")
+
+            elif event_type == "tool_call_complete":
+                # Tool call arguments complete
+                tool_name = data.get("tool_name", "")
+                status_container.success(f"✅ Tool call ready: {tool_name}")
+                progress_steps.append(("tool_complete", f"✅ {tool_name} args complete"))
+
+            elif event_type == "tool_executing":
+                # Tool is running
+                tool_name = data.get("tool_name", "")
+                tool_emoji = "📊" if "member" in tool_name.lower() or "analyst" in tool_name.lower() else "🔎"
+                status_container.info(f"⚙️ Executing {tool_emoji} {tool_name}...")
+
+            elif event_type == "tool_result":
+                # Tool returned results
+                tool_name = data.get("tool_name", "")
+                result_preview = data.get("result_preview", "")[:100]
+                status_container.success(f"📥 {tool_name} returned results")
+                progress_steps.append(("tool_result", f"📥 {tool_name}: {result_preview[:30]}..."))
+
+            # === Common events ===
             elif event_type == "react_answer":
-                # Only display FULL answer from final_answer node, not truncated preview
-                full_answer = data.get("answer", "")  # Only from final_answer node
-                preview = data.get("answer_preview", "")  # Truncated from model node
-                
+                # Final answer - could be from token streaming or node streaming
+                full_answer = data.get("answer", "")
+                preview = data.get("answer_preview", "")
+
                 if full_answer and not answer_displayed:
-                    # This is the FULL answer from final_answer node - display it!
+                    # Use the full answer
                     final_result["output"] = full_answer
                     status_container.empty()
                     response_container.markdown(full_answer)
                     answer_displayed = True
+                    streaming_text = full_answer  # Update streaming text
                     progress_steps.append(("complete", "✅ Answer ready"))
                 elif preview and not answer_displayed:
-                    # This is just a preview - show status but don't display yet
                     status_container.info("✍️ Generating final answer...")
-                    final_result["output"] = preview  # Store preview as fallback
+                    final_result["output"] = preview
 
             elif event_type == "complete":
-                status_container.empty()  # Clear status (if not already cleared)
-                # Extract routing and results from complete event
+                status_container.empty()
+                # If we were token streaming, use accumulated text as answer
+                if streaming_text and not final_result["output"]:
+                    final_result["output"] = streaming_text
+                    if not answer_displayed:
+                        response_container.markdown(streaming_text)
+                        answer_displayed = True
+
+                # Extract routing and results
                 if data.get("routing"):
                     final_result["routing"] = data["routing"]
                 if data.get("analyst_results"):
@@ -494,7 +581,7 @@ def handle_streaming_response(
 
         # Fallback routing from progress steps if not provided by backend
         if not final_result.get("routing"):
-            tools_called = [s[1] for s in progress_steps if s[0] == "tool"]
+            tools_called = [s[1] for s in progress_steps if "tool" in s[0].lower()]
             if any("analyst" in t.lower() or "member" in t.lower() for t in tools_called):
                 if any("search" in t.lower() or "knowledge" in t.lower() for t in tools_called):
                     final_result["routing"] = "both"
@@ -537,6 +624,7 @@ if prompt := st.chat_input("Ask about your healthcare coverage..."):
                 st.session_state.execution_id,
                 status_placeholder,
                 response_placeholder,
+                use_token_streaming=st.session_state.get("use_token_streaming", False),
             )
         else:
             # Use synchronous service function

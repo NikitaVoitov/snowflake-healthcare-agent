@@ -174,3 +174,62 @@ async def stream_agent(
             "Connection": "keep-alive",
         },
     )
+
+
+@router.post("/stream-tokens", status_code=200)
+async def stream_agent_tokens(
+    request: StreamRequest,
+    service: AgentServiceDep,
+    checkpointer: CheckpointerDep,
+) -> StreamingResponse:
+    """Stream healthcare agent with token-level granularity (Server-Sent Events).
+
+    Uses LangGraph's astream_events API to capture fine-grained events:
+    - Token-by-token LLM streaming (requires langchain-snowflake patches)
+    - Tool call progress (name, partial arguments)
+    - Tool execution results
+    - Final answer
+
+    This endpoint enables ChatGPT-like streaming UX where:
+    - Text streams token by token
+    - Tool calls show progress as arguments build
+    - Results appear as they complete
+
+    Event types:
+    - token: Individual token from LLM
+    - tool_call_start: Tool call initiated with name
+    - tool_call_args: Partial tool arguments streaming
+    - tool_call_complete: Tool call finished with full args
+    - tool_executing: Tool starting execution
+    - tool_result: Tool returned result
+    - react_answer: Final answer from agent
+    - complete: Workflow complete with metadata
+
+    Args:
+        request: Stream request with query and streaming options
+        service: Injected AgentService
+        checkpointer: Injected checkpointer
+
+    Returns:
+        StreamingResponse with SSE events for each token and state change
+    """
+
+    async def token_event_generator():
+        """Generate SSE events from agent token stream."""
+        try:
+            async for event in service.stream_tokens(request, checkpointer):
+                yield f"data: {json.dumps(event.model_dump(), default=str)}\n\n"
+        except Exception as e:
+            logger.error(f"Token stream error: {e}", exc_info=True)
+            error_event = {"event_type": "error", "data": {"message": str(e)}}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    logger.info(f"Token stream request: {request.query[:50]}...")
+    return StreamingResponse(
+        token_event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
