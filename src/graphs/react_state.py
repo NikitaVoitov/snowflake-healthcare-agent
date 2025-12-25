@@ -84,13 +84,6 @@ class HealthcareAgentState(TypedDict, total=False):
     # ==========================================================================
     final_answer: str | None  # Final response to user
 
-    # ==========================================================================
-    # Error Handling
-    # ==========================================================================
-    error_count: int
-    last_error: dict | None
-    has_error: bool
-
 
 # =============================================================================
 # Typed Output Dictionaries for Node Return Values
@@ -105,8 +98,6 @@ class ModelOutput(TypedDict, total=False):
 
     messages: list[AnyMessage]  # Single AIMessage to append
     iteration: int
-    has_error: bool
-    last_error: dict | None
 
 
 class FinalAnswerOutput(TypedDict, total=False):
@@ -117,12 +108,3 @@ class FinalAnswerOutput(TypedDict, total=False):
 
     final_answer: str
     conversation_history: list[ConversationTurn]
-
-
-class ErrorHandlerOutput(TypedDict, total=False):
-    """Output from error handler node."""
-
-    has_error: bool
-    error_count: int
-    last_error: dict | None
-    messages: list[AnyMessage]  # Error message to append
