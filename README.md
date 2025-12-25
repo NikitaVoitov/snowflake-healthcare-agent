@@ -1,8 +1,5 @@
 # Healthcare Contact Center ReAct Agent
 
-**Version:** v1.0.82  
-**Last Updated:** December 25, 2024
-
 An AI-powered healthcare contact center assistant built with **ReAct (Reasoning + Acting)** pattern using LangGraph on Snowflake SPCS.
 
 ---
@@ -231,9 +228,13 @@ healthcare/
 │       ├── test_agent_service.py
 │       └── test_real_snowflake.py
 │
-├── patches/                             # langchain-snowflake SPCS fixes
+├── patches/                             # langchain-snowflake bug fixes
+│   ├── langchain_snowflake_streaming_patched.py     # ToolCallChunk for streaming
+│   ├── langchain_snowflake_base_patched.py          # disable_streaming parameter
+│   ├── langchain_snowflake_tools_patched.py         # Message format + tool name fixes
 │   ├── langchain_snowflake_rest_client_patched.py   # SNOWFLAKE_HOST fix
-│   └── langchain_snowflake_tools_patched.py         # content_list parsing fix
+│   ├── apply_patches.sh                             # Apply patches to .venv
+│   └── revert_patches.sh                            # Revert patches
 │
 ├── streamlit/                           # Streamlit Container Runtime app
 │   ├── app.py                           # SSE streaming + service function fallback
@@ -259,7 +260,7 @@ healthcare/
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
 | **SPCS OAuth + Auto-Refresh** | Automatic token refresh when SPCS OAuth tokens expire |
 | **Modern Error Handling** | Native LangGraph `RetryPolicy` with automatic retries (max 3 attempts) |
-| **SSE Streaming** | Real-time progress updates via `/agents/stream` endpoint |
+| **Token-Level Streaming** | Real-time LLM output + tool call progress via SSE (patched `langchain-snowflake`) |
 | **Container Runtime** | Streamlit app runs on SPCS compute pool with internal DNS access |
 
 ---
@@ -360,7 +361,7 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 
 ```bash
 # Build Docker image for linux/amd64 (Distroless)
-VERSION=1.0.82
+VERSION=1.0.87
 docker buildx build --platform linux/amd64 -t healthcare-agent:$VERSION .
 
 # Tag and push to Snowflake registry
@@ -374,8 +375,18 @@ snow sql -c <your_connection_name> --filename scripts/sql/08_spcs_deploy.sql
 ```
 
 > **langchain-snowflake Patches (applied in Dockerfile):**
-> - `rest_client.py`: Uses `SNOWFLAKE_HOST` for correct OAuth authentication in SPCS
-> - `tools.py`: Fixes `content_list` parsing to prevent content duplication (issue #35)
+> 
+> We discovered and fixed **3 critical bugs** in `langchain-snowflake` that break multi-turn conversations with tools:
+> 
+> | Patch | Bug Fixed | Impact |
+> |-------|-----------|--------|
+> | `streaming_patched.py` | Tool call deltas silently dropped | Streaming fails with tools |
+> | `tools_patched.py` | Text in `content_list` instead of top-level `content` | 400 errors on turn 3+ |
+> | `tools_patched.py` | Tool name defaults to "unknown" | Debugging difficulty |
+> | `base_patched.py` | No `disable_streaming` parameter | Can't control streaming |
+> | `rest_client.py` | `SNOWFLAKE_HOST` not used in SPCS | OAuth auth failures |
+> 
+> See `langchain_snowflake_*_bug.md` files for detailed bug reports.
 
 ### Test SPCS Service
 
