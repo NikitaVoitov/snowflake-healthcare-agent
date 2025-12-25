@@ -61,9 +61,6 @@ def initial_state() -> HealthcareAgentState:
         max_iterations=5,
         execution_id="test-exec-001",
         final_answer=None,
-        error_count=0,
-        last_error=None,
-        has_error=False,
     )
 
 
@@ -87,9 +84,6 @@ def state_with_history() -> HealthcareAgentState:
         max_iterations=5,
         execution_id="test-exec-002",
         final_answer=None,
-        error_count=0,
-        last_error=None,
-        has_error=False,
     )
 
 
@@ -122,28 +116,22 @@ def state_after_tool() -> HealthcareAgentState:
         max_iterations=5,
         execution_id="test-exec-003",
         final_answer=None,
-        error_count=0,
-        last_error=None,
-        has_error=False,
     )
 
 
 @pytest.fixture
-def error_state() -> HealthcareAgentState:
-    """State with error condition."""
+def high_iteration_state() -> HealthcareAgentState:
+    """State with high iteration count (near max)."""
     return HealthcareAgentState(
-        messages=[HumanMessage(content="trigger error")],
-        user_query="trigger error",
+        messages=[HumanMessage(content="complex query")],
+        user_query="complex query",
         member_id=None,
         tenant_id="test_tenant",
         conversation_history=[],
-        iteration=3,
+        iteration=4,
         max_iterations=5,
-        execution_id="test-exec-error",
+        execution_id="test-exec-high-iter",
         final_answer=None,
-        error_count=2,
-        last_error={"error_type": "cortex_api", "message": "Service unavailable"},
-        has_error=True,
     )
 
 
@@ -169,8 +157,6 @@ def sample_agent_response() -> AgentResponse:
         routing="analyst",
         execution_id="test-exec-001",
         checkpoint_id="chk-001",
-        error_count=0,
-        last_error=None,
         analyst_results={"coverage": {"physical_therapy": "80%"}},
         search_results=None,
     )
@@ -297,9 +283,6 @@ def mock_compiled_graph() -> AsyncMock:
         "max_iterations": 5,
         "final_answer": "Based on your records, your benefits include...",
         "execution_id": "test-exec",
-        "error_count": 0,
-        "last_error": None,
-        "has_error": False,
     }
 
     async def mock_stream(*_args: object, **_kwargs: object) -> AsyncIterator[dict]:
