@@ -172,9 +172,6 @@ class TestModelNode:
             "max_iterations": 5,
             "execution_id": "test",
             "final_answer": None,
-            "error_count": 0,
-            "last_error": None,
-            "has_error": False,
         }
 
         result = await model_node(state)
@@ -185,10 +182,10 @@ class TestModelNode:
     @pytest.mark.asyncio
     @patch("src.graphs.react_workflow._ensure_snowpark_session_async")
     @patch("src.graphs.react_workflow.get_chat_snowflake")
-    async def test_handles_llm_error(
+    async def test_handles_llm_error_as_message(
         self, mock_get_chat: AsyncMock, mock_ensure_session: AsyncMock, initial_state: HealthcareAgentState
     ) -> None:
-        """Should handle LLM errors gracefully."""
+        """Should handle LLM errors by returning error as AIMessage content (LLM-recoverable pattern)."""
         mock_ensure_session.return_value = None
         mock_llm = AsyncMock()
         mock_llm.ainvoke.side_effect = Exception("API Error")
@@ -196,9 +193,11 @@ class TestModelNode:
 
         result = await model_node(initial_state)
 
-        assert result["has_error"] is True
-        assert result["last_error"]["error_type"] == "llm_error"
+        # Error is returned as message content, not in error state fields
         assert "error" in result["messages"][0].content.lower()
+        # No error state fields - errors are handled via RetryPolicy or message content
+        assert "has_error" not in result
+        assert "last_error" not in result
 
 
 class TestRouteAfterModel:
@@ -221,9 +220,6 @@ class TestRouteAfterModel:
             "max_iterations": 5,
             "execution_id": "test",
             "final_answer": None,
-            "error_count": 0,
-            "last_error": None,
-            "has_error": False,
         }
 
         result = route_after_model(state)
@@ -241,36 +237,13 @@ class TestRouteAfterModel:
             "max_iterations": 5,
             "execution_id": "test",
             "final_answer": None,
-            "error_count": 0,
-            "last_error": None,
-            "has_error": False,
         }
 
         result = route_after_model(state)
         assert result == "final_answer"
 
-    def test_routes_to_error_when_has_error(self) -> None:
-        """Should route to error when has_error is True."""
-        state: HealthcareAgentState = {
-            "messages": [AIMessage(content="Error occurred")],
-            "user_query": "test",
-            "member_id": None,
-            "tenant_id": "test",
-            "conversation_history": [],
-            "iteration": 1,
-            "max_iterations": 5,
-            "execution_id": "test",
-            "final_answer": None,
-            "error_count": 1,
-            "last_error": {"error_type": "test"},
-            "has_error": True,
-        }
-
-        result = route_after_model(state)
-        assert result == "error"
-
-    def test_routes_to_error_when_no_messages(self) -> None:
-        """Should route to error when messages list is empty."""
+    def test_routes_to_final_answer_when_no_messages(self) -> None:
+        """Should route to final_answer when messages list is empty (edge case)."""
         state: HealthcareAgentState = {
             "messages": [],
             "user_query": "test",
@@ -281,13 +254,10 @@ class TestRouteAfterModel:
             "max_iterations": 5,
             "execution_id": "test",
             "final_answer": None,
-            "error_count": 0,
-            "last_error": None,
-            "has_error": False,
         }
 
         result = route_after_model(state)
-        assert result == "error"
+        assert result == "final_answer"  # Falls through to final_answer when no messages
 
 
 class TestFinalAnswerNode:
@@ -314,9 +284,6 @@ class TestFinalAnswerNode:
             "max_iterations": 5,
             "execution_id": "test",
             "final_answer": None,
-            "error_count": 0,
-            "last_error": None,
-            "has_error": False,
         }
 
         result = await final_answer_node(state)
@@ -349,9 +316,6 @@ class TestFinalAnswerNode:
             "max_iterations": 5,
             "execution_id": "test",
             "final_answer": None,
-            "error_count": 0,
-            "last_error": None,
-            "has_error": False,
         }
 
         result = await final_answer_node(state)
