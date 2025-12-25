@@ -5,12 +5,18 @@ Implements the Reasoning + Acting pattern with:
 - @tool decorated functions for automatic schema generation
 - ToolNode for automatic tool execution
 - Tool calls routing via AIMessage.tool_calls
+- RetryPolicy for automatic retry on transient failures
 
 Uses ChatSnowflake from langchain-snowflake for native Cortex integration
 with automatic tool binding and async support.
 
 ALL blocking operations are wrapped in asyncio.to_thread() to avoid
 blocking the event loop.
+
+Error Handling Strategy (per LangGraph best practices):
+- Transient errors (network, rate limits): Automatic retry via RetryPolicy
+- LLM-recoverable errors: Return error as AIMessage content, let LLM adjust
+- Unexpected errors: Let them bubble up for debugging
 """
 
 import asyncio
@@ -21,12 +27,12 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.types import RetryPolicy
 
 from src.config import settings
 from src.graphs.react_prompts import build_system_message
 from src.graphs.react_state import (
     ConversationTurn,
-    ErrorHandlerOutput,
     FinalAnswerOutput,
     HealthcareAgentState,
     ModelOutput,
@@ -295,12 +301,12 @@ async def model_node(state: HealthcareAgentState) -> ModelOutput:
         }
 
     except Exception as e:
+        # LLM-recoverable error pattern: Return error as message content
+        # The LLM can see what went wrong and adjust on next iteration
         logger.error("ChatSnowflake call failed: %s", e, exc_info=True)
         return {
-            "messages": [AIMessage(content=f"I encountered an error: {e!s}")],
+            "messages": [AIMessage(content=f"I encountered an error while processing: {e!s}. Let me try a different approach.")],
             "iteration": iteration,
-            "has_error": True,
-            "last_error": {"error_type": "llm_error", "message": str(e)},
         }
 
 
@@ -342,46 +348,27 @@ async def final_answer_node(state: HealthcareAgentState) -> FinalAnswerOutput:
     }
 
 
-async def error_handler_node(state: HealthcareAgentState) -> ErrorHandlerOutput:
-    """Handle errors during graph execution."""
-    error_count = state.get("error_count", 0) + 1
-    last_error = state.get("last_error")
-
-    logger.error("Error handler invoked (count: %d): %s", error_count, last_error)
-
-    if error_count >= 3:
-        # Too many errors, generate error response
-        error_message = AIMessage(content="I apologize, but I encountered repeated errors. Please try again or rephrase your question.")
-        return {
-            "messages": [error_message],
-            "has_error": False,  # Clear error to allow final_answer
-            "error_count": error_count,
-        }
-
-    return {
-        "has_error": True,
-        "error_count": error_count,
-    }
-
-
 # =============================================================================
 # Routing Logic
 # =============================================================================
 
 
-def route_after_model(state: HealthcareAgentState) -> Literal["tools", "final_answer", "error"]:
+def route_after_model(state: HealthcareAgentState) -> Literal["tools", "final_answer"]:
     """Route based on model output.
 
+    Simple routing per LangGraph best practices:
     - If AIMessage has tool_calls → route to tools
-    - If AIMessage has content only → route to final_answer
-    - If error → route to error_handler
-    """
-    if state.get("has_error"):
-        return "error"
+    - Otherwise → route to final_answer
 
+    Error handling is done via:
+    - RetryPolicy for transient failures (automatic)
+    - Error messages returned as AIMessage content (LLM-recoverable)
+    """
     messages = state.get("messages", [])
     if not messages:
-        return "error"
+        # No messages - go to final answer with default response
+        logger.warning("No messages in state, routing to final_answer")
+        return "final_answer"
 
     last_message = messages[-1]
 
@@ -394,19 +381,9 @@ def route_after_model(state: HealthcareAgentState) -> Literal["tools", "final_an
             logger.info("Routing to final_answer")
             return "final_answer"
 
-    # Unexpected message type
-    logger.warning("Unexpected message type: %s", type(last_message))
-    return "error"
-
-
-def route_after_error(state: HealthcareAgentState) -> Literal["model", "final_answer"]:
-    """Route after error handling."""
-    error_count = state.get("error_count", 0)
-
-    if error_count >= 3:
-        return "final_answer"
-
-    return "model"
+    # Unexpected message type - route to final_answer
+    logger.warning("Unexpected message type: %s, routing to final_answer", type(last_message))
+    return "final_answer"
 
 
 # =============================================================================
@@ -415,32 +392,39 @@ def route_after_error(state: HealthcareAgentState) -> Literal["model", "final_an
 
 
 def build_react_graph() -> StateGraph:
-    """Build the modern ReAct graph with ToolNode.
+    """Build the modern ReAct graph with ToolNode and RetryPolicy.
 
     Graph structure:
         START → model → [tools → model] (loop) → final_answer → END
 
     The loop continues until model returns AIMessage without tool_calls.
+
+    Error handling (per LangGraph best practices):
+    - RetryPolicy on model/tools nodes for automatic retry on transient failures
+    - LLM-recoverable errors returned as AIMessage content
+    - Unexpected errors bubble up for debugging
     """
     graph = StateGraph(HealthcareAgentState)
 
-    # Add nodes
-    graph.add_node("model", model_node)
-    graph.add_node("tools", TOOL_NODE)  # ToolNode handles tool execution
+    # Retry policy for transient failures (network issues, rate limits)
+    # Retries with exponential backoff: 1s, 2s, 4s (max 3 attempts)
+    retry_policy = RetryPolicy(max_attempts=3, initial_interval=1.0, backoff_factor=2.0)
+
+    # Add nodes with retry policies
+    graph.add_node("model", model_node, retry_policy=retry_policy)
+    graph.add_node("tools", TOOL_NODE, retry_policy=retry_policy)
     graph.add_node("final_answer", final_answer_node)
-    graph.add_node("error_handler", error_handler_node)
 
     # Set entry point
     graph.set_entry_point("model")
 
-    # Add edges
+    # Add edges - simple routing without error handler
     graph.add_conditional_edges(
         "model",
         route_after_model,
         {
             "tools": "tools",
             "final_answer": "final_answer",
-            "error": "error_handler",
         },
     )
 
@@ -449,16 +433,6 @@ def build_react_graph() -> StateGraph:
 
     # Final answer ends the graph
     graph.add_edge("final_answer", END)
-
-    # Error handling
-    graph.add_conditional_edges(
-        "error_handler",
-        route_after_error,
-        {
-            "model": "model",
-            "final_answer": "final_answer",
-        },
-    )
 
     return graph
 
