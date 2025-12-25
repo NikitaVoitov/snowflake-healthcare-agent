@@ -84,6 +84,10 @@ flowchart TB
     CortexSearch --> KnowledgeData
 ```
 
+### LangGraph 
+
+![langgraph_dev](https://github.com/user-attachments/assets/e5ca09f4-8387-45a0-be69-b592447e75a3)
+
 ### ReAct Loop Example
 
 ```
@@ -247,6 +251,13 @@ healthcare/
 | **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
 | **SPCS OAuth** | Automatic `Snowflake Token` authentication via session |
+
+---
+
+## Streamlit UI
+
+![stremlit_app_ui](https://github.com/user-attachments/assets/0dc71a12-c8e9-4cd1-92ae-5a6925ae33e2)
+
 
 ---
 
