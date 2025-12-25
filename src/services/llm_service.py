@@ -162,6 +162,9 @@ async def _create_spcs_chat_model(model: str, temperature: float) -> ChatSnowfla
         session=session,
         model=model,
         temperature=temperature,
+        # Disable streaming to avoid langchain-core falling back to _astream
+        # which fails with "No generations found in stream" error
+        disable_streaming=True,
     )
 
 
@@ -306,6 +309,9 @@ async def _create_local_chat_model(model: str, temperature: float) -> ChatSnowfl
         # Database context
         database=settings.snowflake_database,
         warehouse=settings.snowflake_warehouse,
+        # Disable streaming to avoid langchain-core falling back to _astream
+        # which fails with "No generations found in stream" error
+        disable_streaming=True,
     )
 
 
