@@ -273,7 +273,7 @@ healthcare/
 - Snowflake account with Cortex services enabled
 - Python 3.11+ with `uv` package manager
 - Key-pair Snowflake authentication configured
-- Snow CLI configured (`snow sql -c jwt` works)
+- Snow CLI configured
 
 ### Quick Start
 
@@ -326,11 +326,11 @@ docker buildx build --platform linux/amd64 -t healthcare-agent:1.0.80 .
 # Tag and push to Snowflake registry
 REGISTRY="your-account.registry.snowflakecomputing.com"
 docker tag healthcare-agent:1.0.80 ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.80
-snow spcs image-registry login -c jwt
+snow spcs image-registry login -c <your_connection_name>
 docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent:1.0.80
 
 # Deploy service
-snow sql -c jwt --filename scripts/sql/08_spcs_deploy.sql
+snow sql -c <your_connection_name> --filename scripts/sql/08_spcs_deploy.sql
 ```
 
 > **langchain-snowflake Patches (applied in Dockerfile):**
