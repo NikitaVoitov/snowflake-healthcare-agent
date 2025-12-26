@@ -15,5 +15,3 @@ __all__ = [
     "set_snowpark_session",
     "get_snowpark_session",
 ]
-
-
