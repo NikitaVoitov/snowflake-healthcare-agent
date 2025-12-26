@@ -137,4 +137,6 @@ impl_plan_final.md
 TODO*.md
 original_langchain_snwoflake_repo/
 notebooks/
+# Exclude all bug report markdown files from being committed
+langchain_snowflake*bug.md
 
