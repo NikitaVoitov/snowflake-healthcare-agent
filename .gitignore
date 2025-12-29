@@ -139,4 +139,10 @@ original_langchain_snwoflake_repo/
 notebooks/
 # Exclude all bug report markdown files from being committed
 langchain_snowflake*bug.md
-
+splunk_otel_python_contrib_langchain_instrumentation.md
+healthcare_agent_instrumentation_guide.md
+traces/
+fixed_traces/
+unknown_model_traces/
+no_tools_attrs_trace/
+/splunk-otel-python-contrib/
