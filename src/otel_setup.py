@@ -68,17 +68,19 @@ def setup_opentelemetry() -> bool:
         resource = Resource.create(resource_attrs)
 
         # Setup TracerProvider
+        # Increased timeout to 30s to reduce DEADLINE_EXCEEDED errors over WAN
         tracer_provider = TracerProvider(resource=resource)
-        tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(timeout=30)))
         trace.set_tracer_provider(tracer_provider)
 
         # Setup MeterProvider
         # Note: Histogram bucket boundaries for metrics like gen_ai.tool.search.score
         # are pre-configured in splunk-otel-python-contrib using
         # explicit_bucket_boundaries_advisory - no Views needed here.
+        # Increased timeout to 30s to reduce DEADLINE_EXCEEDED errors over WAN
         metric_reader = PeriodicExportingMetricReader(
-            OTLPMetricExporter(),
-            export_interval_millis=30000,
+            OTLPMetricExporter(timeout=30),  # 30 second timeout (default is 10s)
+            export_interval_millis=60000,    # Export every 60s instead of 30s
         )
         meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
         metrics.set_meter_provider(meter_provider)
