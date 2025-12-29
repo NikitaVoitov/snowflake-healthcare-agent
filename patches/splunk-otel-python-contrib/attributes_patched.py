@@ -138,3 +138,25 @@ SNOWFLAKE_CORTEX_ANALYST_WARNINGS_COUNT = "snowflake.cortex_analyst.warnings_cou
 # Guard tokens consumed by Cortex Guard (content safety) if enabled
 # Useful for tracking cost and usage of Snowflake's safety features
 SNOWFLAKE_INFERENCE_GUARD_TOKENS = "snowflake.inference.guard_tokens"
+
+# ============================================================================
+# Snowflake Cortex Pricing Defaults
+# ============================================================================
+# Default pricing rates from Snowflake Service Consumption Table (Dec 19, 2025)
+# These can be overridden via environment variables:
+# - OTEL_SNOWFLAKE_CORTEX_ANALYST_CREDITS_PER_MESSAGE
+# - OTEL_SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_1000_QUERIES
+# - OTEL_SNOWFLAKE_CREDIT_PRICE_USD
+#
+# Reference: https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf
+
+# Cortex Analyst: 6.7 credits per 100 messages = 0.067 credits/message
+# Note: Token count does NOT affect cost for direct Cortex Analyst calls
+SNOWFLAKE_CORTEX_ANALYST_CREDITS_PER_MESSAGE_DEFAULT: float = 0.067
+
+# Cortex Search: 1.7 credits per 1000 queries
+SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_1000_QUERIES_DEFAULT: float = 1.7
+SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_QUERY_DEFAULT: float = 0.0017
+
+# On-Demand credit pricing (varies by contract/region)
+SNOWFLAKE_CREDIT_PRICE_USD_DEFAULT: float = 3.00

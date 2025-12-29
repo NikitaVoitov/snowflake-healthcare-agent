@@ -10,6 +10,8 @@
 # 6. Snowflake Cortex Search provider-specific attributes
 # 7. Snowflake Cortex Analyst provider-specific attributes
 # 8. Search score histogram metric
+# 9. Cortex Inference LLM completion attributes (gen_ai.response.*)
+# 10. Snowflake Cortex pricing configuration for cost metrics
 #
 # Usage: ./apply_patches.sh [VENV_PATH]
 #   VENV_PATH: Optional path to virtual environment (defaults to .venv)
@@ -87,6 +89,16 @@ if [ ! -f "$UTIL_GENAI/emitters/metrics.py.original" ]; then
     echo "   ✓ Backed up emitters/metrics.py"
 fi
 
+if [ ! -f "$UTIL_GENAI/environment_variables.py.original" ]; then
+    cp "$UTIL_GENAI/environment_variables.py" "$UTIL_GENAI/environment_variables.py.original"
+    echo "   ✓ Backed up environment_variables.py"
+fi
+
+if [ ! -f "$UTIL_GENAI/config.py.original" ]; then
+    cp "$UTIL_GENAI/config.py" "$UTIL_GENAI/config.py.original"
+    echo "   ✓ Backed up config.py"
+fi
+
 # Apply patches
 echo ""
 echo "🔧 Applying patches..."
@@ -108,6 +120,12 @@ echo "   ✓ Applied instruments.py patch (search score histogram)"
 
 cp "$SCRIPT_DIR/metrics_patched.py" "$UTIL_GENAI/emitters/metrics.py"
 echo "   ✓ Applied emitters/metrics.py patch (search score metric recording)"
+
+cp "$SCRIPT_DIR/environment_variables_patched.py" "$UTIL_GENAI/environment_variables.py"
+echo "   ✓ Applied environment_variables.py patch (Snowflake pricing env vars)"
+
+cp "$SCRIPT_DIR/config_patched.py" "$UTIL_GENAI/config.py"
+echo "   ✓ Applied config.py patch (Settings with pricing configuration)"
 
 # Clear Python cache
 echo ""
@@ -148,5 +166,21 @@ echo "  18. snowflake.cortex_analyst.model_names - LLM models used"
 echo "  19. snowflake.cortex_analyst.question_category - Query classification"
 echo "  20. snowflake.cortex_analyst.verified_query.* - VQR match details"
 echo "  21. snowflake.cortex_analyst.warnings_count - Warning count"
+echo ""
+echo "Snowflake Cortex Inference LLM attributes:"
+echo "  22. gen_ai.response.id - Request ID from Cortex Inference API"
+echo "  23. gen_ai.response.finish_reasons - Array of stop reasons"
+echo "  24. snowflake.inference.guard_tokens - Cortex Guard tokens consumed"
+echo ""
+echo "Cost Tracking (configurable via env vars):"
+echo "  - OTEL_SNOWFLAKE_CORTEX_ANALYST_CREDITS_PER_MESSAGE (default: 0.067)"
+echo "  - OTEL_SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_1000_QUERIES (default: 1.7)"
+echo "  - OTEL_SNOWFLAKE_CREDIT_PRICE_USD (default: 3.00)"
+echo ""
+echo "Metrics:"
+echo "  - snowflake.cortex_analyst.messages (counter)"
+echo "  - snowflake.cortex_search.queries (counter)"
+echo "  - snowflake.cortex.credits (counter)"
+echo "  - snowflake.cortex.cost (counter, USD)"
 echo ""
 echo "To revert, run: ./revert_patches.sh"

@@ -82,3 +82,44 @@ class Instruments:
             description="Top similarity score from search/retrieval tool operations",
             explicit_bucket_boundaries_advisory=_GEN_AI_TOOL_SEARCH_SCORE_BUCKETS,
         )
+        # ================================================================
+        # Snowflake Cortex Cost Metrics
+        # ================================================================
+        # These metrics enable cost tracking for Snowflake Cortex services.
+        # Credits consumed are calculated using configurable rates from
+        # environment variables (see OTEL_SNOWFLAKE_* in environment_variables.py).
+        #
+        # Dimensions:
+        #   - gen_ai.provider.name: Always "snowflake"
+        #   - snowflake.database: Database context
+        #   - snowflake.warehouse: Warehouse used
+        #   - gen_ai.tool.name: Tool name (for Cortex Analyst/Search)
+        #   - gen_ai.operation.name: Operation type
+
+        # Counter for Cortex Analyst messages (cost = count × credits_per_message)
+        self.cortex_analyst_message_counter = meter.create_counter(
+            name="snowflake.cortex_analyst.messages",
+            unit="{message}",
+            description="Number of Cortex Analyst messages processed (successful HTTP 200 only)",
+        )
+
+        # Counter for Cortex Search queries (cost = count × credits_per_query)
+        self.cortex_search_query_counter = meter.create_counter(
+            name="snowflake.cortex_search.queries",
+            unit="{query}",
+            description="Number of Cortex Search queries executed",
+        )
+
+        # Counter for estimated credits consumed (pre-calculated using configured rates)
+        self.cortex_credits_counter = meter.create_counter(
+            name="snowflake.cortex.credits",
+            unit="{credit}",
+            description="Estimated Snowflake credits consumed by Cortex services",
+        )
+
+        # Counter for estimated cost in USD (credits × credit_price_usd)
+        self.cortex_cost_counter = meter.create_counter(
+            name="snowflake.cortex.cost",
+            unit="USD",
+            description="Estimated cost in USD for Cortex services (based on configured rates)",
+        )

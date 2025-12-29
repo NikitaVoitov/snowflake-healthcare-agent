@@ -206,16 +206,65 @@ Uses standard GenAI semantic convention attributes where available (for portabil
 - `span.py`: Added `gen_ai.response.finish_reasons` and `snowflake.inference.guard_tokens` to `_SPAN_ALLOWED_SUPPLEMENTAL_KEYS`
 - `attributes.py`: Added only `SNOWFLAKE_INFERENCE_GUARD_TOKENS` (others are standard semconv)
 
+### 10. Snowflake Cortex Pricing Configuration (Enhancement)
+
+**Problem:** Users need to estimate costs for Cortex API calls but pricing rates can change over time.
+
+**Solution:** Added configurable pricing constants with environment variable overrides.
+
+**Pricing Model (verified from Snowflake Service Consumption Table, Dec 19, 2025):**
+
+| Service | Pricing Model | Default Rate | Environment Variable |
+|---------|---------------|--------------|---------------------|
+| **Cortex Analyst** | Per Message | **0.067 credits/message** | `OTEL_SNOWFLAKE_CORTEX_ANALYST_CREDITS_PER_MESSAGE` |
+| **Cortex Search** | Per 1000 Queries | **1.7 credits/1000** | `OTEL_SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_1000_QUERIES` |
+| **Credit Price** | USD | **$3.00/credit** | `OTEL_SNOWFLAKE_CREDIT_PRICE_USD` |
+
+**Important Note:**
+> For direct Cortex Analyst calls, **token count does NOT affect cost**. Cost is based purely on message count.
+> Token-based pricing only applies when Cortex Analyst is invoked via Cortex Agents.
+
+**Files Changed:**
+- `environment_variables.py`: Added pricing env var definitions
+- `attributes.py`: Added pricing default constants
+- `config.py`: Extended `Settings` dataclass with pricing fields and cost estimation methods
+- `instruments.py`: Added cost counters for automatic metrics
+
+**Library-Level Usage (Auto-Instrumentation):**
+The pricing configuration is built into `splunk-otel-python-contrib` for universal auto-instrumentation support.
+
+```python
+from opentelemetry.util.genai.config import parse_env
+
+settings = parse_env()
+
+# Access pricing rates
+print(settings.snowflake_cortex_analyst_credits_per_message)  # 0.067
+print(settings.snowflake_cortex_search_credits_per_query)     # 0.0017
+
+# Estimate costs
+cost_usd = settings.estimate_cortex_analyst_cost_usd(message_count=100)
+# → 100 × 0.067 × $3.00 = $20.10
+```
+
+**Cost Metrics (automatically emitted):**
+- `snowflake.cortex_analyst.messages` - Message count (counter)
+- `snowflake.cortex_search.queries` - Query count (counter)
+- `snowflake.cortex.credits` - Credits consumed (counter)
+- `snowflake.cortex.cost` - Cost in USD (counter)
+
 ## Patched Files Summary
 
 | File | Target Location | Description |
 |------|----------------|-------------|
-| `callback_handler_patched.py` | `opentelemetry/instrumentation/langchain/callback_handler.py` | Parent span linking, model extraction, provider propagation |
+| `callback_handler_patched.py` | `opentelemetry/instrumentation/langchain/callback_handler.py` | Parent span linking, model extraction, provider propagation, Cortex Inference attributes |
 | `span_emitter_patched.py` | `opentelemetry/util/genai/emitters/span.py` | Tool attributes, Snowflake Search & Analyst metadata extraction |
 | `types_patched.py` | `opentelemetry/util/genai/types.py` | `parent_span` field for hierarchy |
-| `attributes_patched.py` | `opentelemetry/util/genai/attributes.py` | Snowflake Cortex Search + Analyst attribute constants (18 total) |
-| `instruments_patched.py` | `opentelemetry/util/genai/instruments.py` | Search score histogram with pre-configured buckets |
+| `attributes_patched.py` | `opentelemetry/util/genai/attributes.py` | Snowflake Cortex Search + Analyst + Inference attributes + pricing defaults |
+| `instruments_patched.py` | `opentelemetry/util/genai/instruments.py` | Search score histogram + Cortex cost counters |
 | `metrics_patched.py` | `opentelemetry/util/genai/emitters/metrics.py` | Search score metric recording with exemplar linking |
+| `environment_variables_patched.py` | `opentelemetry/util/genai/environment_variables.py` | Snowflake Cortex pricing env var definitions |
+| `config_patched.py` | `opentelemetry/util/genai/config.py` | Settings dataclass with pricing configuration |
 
 ## How to Apply Patches
 

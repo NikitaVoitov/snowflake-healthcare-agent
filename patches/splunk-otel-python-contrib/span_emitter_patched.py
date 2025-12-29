@@ -169,20 +169,29 @@ def _extract_snowflake_search_metadata(
     # Extract Snowflake context from Cortex Search Metadata section
     # These are the same attributes as Cortex Analyst for consistency
     if "--- Cortex Search Metadata ---" in tool_response:
-        # Extract database - use \S+ to capture only the identifier (no spaces)
-        db_match = re.search(r"@snowflake\.database:\s*(\S+)", tool_response)
-        if db_match:
-            result["database"] = db_match.group(1).strip()
+        # Helper to extract and clean identifier values (strips trailing quotes)
+        def clean_identifier(pattern: str, text: str) -> str | None:
+            match = re.search(pattern, text)
+            if match:
+                value = match.group(1).strip()
+                # Clean up trailing quotes that might be captured from JSON/string boundaries
+                return value.rstrip('"')
+            return None
+        
+        # Extract database
+        db = clean_identifier(r"@snowflake\.database:\s*(\S+)", tool_response)
+        if db:
+            result["database"] = db
         
         # Extract schema
-        schema_match = re.search(r"@snowflake\.schema:\s*(\S+)", tool_response)
-        if schema_match:
-            result["schema"] = schema_match.group(1).strip()
+        schema = clean_identifier(r"@snowflake\.schema:\s*(\S+)", tool_response)
+        if schema:
+            result["schema"] = schema
         
         # Extract warehouse
-        wh_match = re.search(r"@snowflake\.warehouse:\s*(\S+)", tool_response)
-        if wh_match:
-            result["warehouse"] = wh_match.group(1).strip()
+        warehouse = clean_identifier(r"@snowflake\.warehouse:\s*(\S+)", tool_response)
+        if warehouse:
+            result["warehouse"] = warehouse
     
     return result
 

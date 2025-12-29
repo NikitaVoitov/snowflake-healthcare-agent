@@ -89,6 +89,24 @@ else
     echo "   ⚠ No backup found for emitters/metrics.py"
 fi
 
+# Revert environment_variables.py
+if [ -f "$UTIL_GENAI/environment_variables.py.original" ]; then
+    cp "$UTIL_GENAI/environment_variables.py.original" "$UTIL_GENAI/environment_variables.py"
+    echo "   ✓ Reverted environment_variables.py"
+    REVERTED=1
+else
+    echo "   ⚠ No backup found for environment_variables.py"
+fi
+
+# Revert config.py
+if [ -f "$UTIL_GENAI/config.py.original" ]; then
+    cp "$UTIL_GENAI/config.py.original" "$UTIL_GENAI/config.py"
+    echo "   ✓ Reverted config.py"
+    REVERTED=1
+else
+    echo "   ⚠ No backup found for config.py"
+fi
+
 # Clear Python cache
 echo ""
 echo "🧹 Clearing Python cache..."

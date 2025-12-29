@@ -14,7 +14,10 @@ from opentelemetry.semconv._incubating.attributes import (
 
 from ..attributes import (
     SNOWFLAKE_CORTEX_SEARCH_SOURCES,
+    SNOWFLAKE_DATABASE,
+    SNOWFLAKE_WAREHOUSE,
 )
+from ..config import parse_env
 from ..instruments import Instruments
 from ..interfaces import EmitterMeta
 from ..types import (
@@ -104,6 +107,13 @@ class MetricsEmitter(EmitterMeta):
         self._agent_duration_histogram: Histogram = instruments.agent_duration_histogram
         # New: Search score histogram for tool operations
         self._search_score_histogram: Histogram = instruments.tool_search_score_histogram
+        # Snowflake Cortex cost tracking counters
+        self._cortex_analyst_message_counter = instruments.cortex_analyst_message_counter
+        self._cortex_search_query_counter = instruments.cortex_search_query_counter
+        self._cortex_credits_counter = instruments.cortex_credits_counter
+        self._cortex_cost_counter = instruments.cortex_cost_counter
+        # Load pricing config from environment
+        self._settings = parse_env()
 
     def on_start(self, obj: Any) -> None:  # no-op for metrics
         return None
@@ -172,6 +182,18 @@ class MetricsEmitter(EmitterMeta):
 
             # Record search score metric if available in tool response
             self._record_search_score_metric(tool_invocation)
+
+            # Record Cortex Analyst cost metrics if applicable
+            tool_response = tool_invocation.attributes.get("tool.response", "")
+            if tool_response and "--- Cortex Analyst Metadata ---" in tool_response:
+                context = None
+                span = getattr(tool_invocation, "span", None)
+                if span is not None:
+                    try:
+                        context = trace.set_span_in_context(span)
+                    except (ValueError, RuntimeError):
+                        context = None
+                self._record_cortex_analyst_cost(tool_invocation, tool_response, context)
 
         if isinstance(obj, EmbeddingInvocation):
             embedding_invocation = obj
@@ -387,3 +409,83 @@ class MetricsEmitter(EmitterMeta):
 
         # Record the score histogram
         self._search_score_histogram.record(top_score, attributes=metric_attrs, context=context)
+
+        # Record Cortex Search cost metrics (if this is a Cortex Search tool)
+        if "--- Cortex Search Metadata ---" in tool_response:
+            self._record_cortex_search_cost(tool, tool_response, context)
+
+    def _record_cortex_analyst_cost(
+        self, tool: ToolCall, tool_response: str, context: Any
+    ) -> None:
+        """Record cost metrics for Snowflake Cortex Analyst tool calls.
+
+        Cortex Analyst charges per message (0.067 credits/message by default).
+        Each successful tool response = 1 message.
+        """
+        # Build metric attributes
+        metric_attrs: dict[str, Any] = {
+            "gen_ai.tool.name": tool.name,
+            GenAI.GEN_AI_PROVIDER_NAME: "snowflake",
+            "snowflake.service": "cortex_analyst",
+        }
+
+        # Extract database/warehouse from response for dimensions
+        # Use word-boundary pattern to avoid capturing trailing metadata
+        db_match = re.search(r"@snowflake\.database:\s*([A-Za-z0-9_]+)", tool_response)
+        if db_match:
+            metric_attrs[SNOWFLAKE_DATABASE] = db_match.group(1)
+
+        wh_match = re.search(r"@snowflake\.warehouse:\s*([A-Za-z0-9_]+)", tool_response)
+        if wh_match:
+            metric_attrs[SNOWFLAKE_WAREHOUSE] = wh_match.group(1)
+
+        if tool.agent_name:
+            metric_attrs[GenAI.GEN_AI_AGENT_NAME] = tool.agent_name
+
+        # Record message count (1 per successful response)
+        self._cortex_analyst_message_counter.add(1, attributes=metric_attrs, context=context)
+
+        # Calculate and record credits/cost
+        credits = self._settings.snowflake_cortex_analyst_credits_per_message
+        cost_usd = credits * self._settings.snowflake_credit_price_usd
+
+        self._cortex_credits_counter.add(credits, attributes=metric_attrs, context=context)
+        self._cortex_cost_counter.add(cost_usd, attributes=metric_attrs, context=context)
+
+    def _record_cortex_search_cost(
+        self, tool: ToolCall, tool_response: str, context: Any
+    ) -> None:
+        """Record cost metrics for Snowflake Cortex Search tool calls.
+
+        Cortex Search charges per query (1.7 credits/1000 queries by default).
+        Each successful tool response = 1 query.
+        """
+        # Build metric attributes
+        metric_attrs: dict[str, Any] = {
+            "gen_ai.tool.name": tool.name,
+            GenAI.GEN_AI_PROVIDER_NAME: "snowflake",
+            "snowflake.service": "cortex_search",
+        }
+
+        # Extract database/warehouse from response for dimensions
+        # Use word-boundary pattern to avoid capturing trailing metadata
+        db_match = re.search(r"@snowflake\.database:\s*([A-Za-z0-9_]+)", tool_response)
+        if db_match:
+            metric_attrs[SNOWFLAKE_DATABASE] = db_match.group(1)
+
+        wh_match = re.search(r"@snowflake\.warehouse:\s*([A-Za-z0-9_]+)", tool_response)
+        if wh_match:
+            metric_attrs[SNOWFLAKE_WAREHOUSE] = wh_match.group(1)
+
+        if tool.agent_name:
+            metric_attrs[GenAI.GEN_AI_AGENT_NAME] = tool.agent_name
+
+        # Record query count (1 per successful response)
+        self._cortex_search_query_counter.add(1, attributes=metric_attrs, context=context)
+
+        # Calculate and record credits/cost
+        credits = self._settings.snowflake_cortex_search_credits_per_query
+        cost_usd = credits * self._settings.snowflake_credit_price_usd
+
+        self._cortex_credits_counter.add(credits, attributes=metric_attrs, context=context)
+        self._cortex_cost_counter.add(cost_usd, attributes=metric_attrs, context=context)
