@@ -766,7 +766,7 @@ class AsyncCortexSearchTool:
         query: str,
         sources: list[str] | None = None,
         limit: int = 5,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Execute Cortex Search query asynchronously.
 
         Searches multiple sources in parallel using asyncio.TaskGroup.
@@ -777,7 +777,7 @@ class AsyncCortexSearchTool:
             limit: Maximum results per source.
 
         Returns:
-            List of search results with text, score, source, metadata.
+            Dictionary with results list and Snowflake context metadata for observability.
         """
         sources = sources or ["FAQS_SEARCH", "POLICIES_SEARCH", "TRANSCRIPTS_SEARCH"]
         all_results: list[dict] = []
@@ -793,4 +793,14 @@ class AsyncCortexSearchTool:
             for exc in eg.exceptions:
                 logger.warning("Search task failed: %s", exc)
 
-        return all_results
+        # Return results with Snowflake context for observability
+        return {
+            "results": all_results,
+            "cortex_search_metadata": {
+                "snowflake": {
+                    "database": settings.snowflake_database,
+                    "schema": "KNOWLEDGE_SCHEMA",  # Hardcoded in search_service.py
+                    "warehouse": settings.snowflake_warehouse,
+                },
+            },
+        }

@@ -107,10 +107,10 @@ async def search_knowledge(
 
     try:
         search_tool = AsyncCortexSearchTool(session)
-        results = await search_tool.execute(query=query)
+        response = await search_tool.execute(query=query)
 
-        # Format the results as a readable string
-        return _format_search_results(results)
+        # Format the results as a readable string (response is now a dict with results and metadata)
+        return _format_search_results(response)
 
     except Exception as e:
         logger.error(f"search_knowledge failed: {e}")
@@ -303,12 +303,23 @@ def _append_cortex_analyst_metadata(parts: list, cortex_metadata: dict, result: 
     parts.append(f"@cortex_analyst.warnings_count: {len(warnings)}")
 
 
-def _format_search_results(results: list) -> str:
+def _format_search_results(response: dict) -> str:
     """Format Cortex Search results as a readable string with preserved metadata.
 
     The formatted string includes structured metadata markers that can be parsed
     by instrumentation to extract Cortex Search metrics like scores and request IDs.
+
+    Args:
+        response: Dictionary with 'results' list and 'cortex_search_metadata' dict.
     """
+    # Handle both old format (list) and new format (dict with results key)
+    if isinstance(response, list):
+        results = response
+        cortex_metadata = {}
+    else:
+        results = response.get("results", [])
+        cortex_metadata = response.get("cortex_search_metadata", {})
+
     if not results:
         return "[Knowledge Search] No relevant documents found."
 
@@ -376,7 +387,31 @@ def _format_search_results(results: list) -> str:
         top_cosine = max((s.get("cosine_similarity", 0) or 0) for s in all_scores)
         parts.append(f"\n@top_cosine_similarity: {top_cosine:.3f}")
 
+    # Add Snowflake context metadata (same as Cortex Analyst)
+    _append_cortex_search_metadata(parts, cortex_metadata)
+
     return "\n".join(parts)
+
+
+def _append_cortex_search_metadata(parts: list, cortex_metadata: dict) -> None:
+    """Append Cortex Search observability metadata markers (Snowflake context).
+
+    These markers follow the same pattern as Cortex Analyst (@snowflake.database, etc.)
+    to provide consistent observability attributes for both services.
+    """
+    if not cortex_metadata:
+        return
+
+    parts.append("\n--- Cortex Search Metadata ---")
+
+    # Snowflake context (same attributes as Cortex Analyst)
+    sf_ctx = cortex_metadata.get("snowflake", {})
+    if sf_ctx.get("database"):
+        parts.append(f"@snowflake.database: {sf_ctx['database']}")
+    if sf_ctx.get("schema"):
+        parts.append(f"@snowflake.schema: {sf_ctx['schema']}")
+    if sf_ctx.get("warehouse"):
+        parts.append(f"@snowflake.warehouse: {sf_ctx['warehouse']}")
 
 
 # =============================================================================
