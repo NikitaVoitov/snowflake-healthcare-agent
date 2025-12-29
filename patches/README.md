@@ -88,6 +88,26 @@ Let me check the weather for you.     ← TEXT STREAMS TOKEN BY TOKEN!
 
 - `langchain_snowflake_streaming_patched.py` - Patched streaming.py
 - `langchain_snowflake_base_patched.py` - Patched base.py
+- `langchain_snowflake_tools_patched.py` - Patched tools.py (message format + OTel observability)
+- `langchain_snowflake_utils_patched.py` - Patched utils.py (Cortex Inference metadata)
+- `langchain_snowflake_retrievers_patched.py` - Patched retrievers.py (request_id propagation)
+- `langchain_snowflake_mcp_integration_patched.py` - Patched mcp_integration.py (Tool import fix)
 - `apply_patches.sh` - Shell script to apply patches
+- `revert_patches.sh` - Shell script to revert patches
 - `README.md` - This file
+
+### OTel Observability Patches
+
+The following files are patched to enable OpenTelemetry observability for Snowflake Cortex:
+
+| File | Observability Feature |
+|------|----------------------|
+| `tools.py` | Extracts `request_id`, `finish_reason`, `guard_tokens` from Cortex Inference API response |
+| `utils.py` | `SnowflakeMetadataFactory.create_response_metadata` accepts new observability fields |
+| `retrievers.py` | Propagates `_snowflake_request_id` to Document metadata |
+
+These patches enable standard OTel GenAI semconv attributes:
+- `gen_ai.response.id` - Request ID from Cortex Inference API
+- `gen_ai.response.finish_reasons` - Array of stop reasons (standard semconv)
+- `snowflake.inference.guard_tokens` - Snowflake-specific: Cortex Guard token usage
 

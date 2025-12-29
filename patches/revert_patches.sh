@@ -69,6 +69,13 @@ else
     echo "⚠️ No backup found for retrievers.py"
 fi
 
+if [ -f "$LANGCHAIN_SNOWFLAKE_DIR/utils.py.original" ]; then
+    echo "🔄 Restoring original utils.py..."
+    cp "$LANGCHAIN_SNOWFLAKE_DIR/utils.py.original" "$LANGCHAIN_SNOWFLAKE_DIR/utils.py"
+else
+    echo "⚠️ No backup found for utils.py"
+fi
+
 echo ""
 echo "✅ Patches reverted successfully!"
 echo ""

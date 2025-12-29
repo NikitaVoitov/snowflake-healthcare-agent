@@ -4,6 +4,7 @@ PATCHES APPLIED (Format Fixes Only - NO conversation trimming):
 1. Fix assistant message format: Include top-level 'content' field per Snowflake REST API spec
 2. Fix tool_results: Ensure tool name is correctly extracted from tool_call_id mapping
 3. Truncate individual tool outputs (>4000 chars) - NOT conversation history
+4. Extract Cortex Inference metadata (request_id, finish_reason, guard_tokens) for OTel observability
 
 WHY 400 BAD REQUEST OCCURS:
 - Snowflake REST API expects assistant messages with tool_calls to have BOTH:
@@ -11,6 +12,11 @@ WHY 400 BAD REQUEST OCCURS:
   - "content_list": [{"type": "tool_use", ...}] (tool_use blocks only)
 - Original langchain-snowflake puts text INSIDE content_list, not as top-level field
 - This format mismatch causes 400 Bad Request on multi-turn conversations
+
+OTEL OBSERVABILITY:
+- Extracts request_id from response 'id' field -> maps to gen_ai.response.id (standard semconv)
+- Extracts finish_reason from choices[0].finish_reason -> maps to gen_ai.response.finish_reasons
+- Extracts guard_tokens from usage.guard_tokens -> maps to snowflake.inference.guard_tokens
 """
 
 import json
@@ -484,10 +490,39 @@ The goal is to provide the most helpful, accurate, and relevant information to t
 
         full_content = "".join(content_parts)
 
+        # PATCH: Extract finish_reason from streaming response
+        finish_reason = None
+        for choice in choices:
+            if "finish_reason" in choice:
+                finish_reason = choice["finish_reason"]
+                break
+
+        # PATCH: Build response_metadata with Cortex Inference observability fields
+        response_metadata = {
+            "model_name": response_data.get("model", self.model),
+        }
+        
+        # PATCH: Add request_id for OTel observability (maps to gen_ai.response.id)
+        if "id" in response_data:
+            response_metadata["snowflake_request_id"] = response_data["id"]
+        
+        # PATCH: Add finish_reason for OTel observability (maps to gen_ai.response.finish_reasons)
+        if finish_reason:
+            response_metadata["finish_reason"] = finish_reason
+        elif tool_calls:
+            response_metadata["finish_reason"] = "tool_calls"
+        else:
+            response_metadata["finish_reason"] = "stop"
+        
+        # PATCH: Add guard_tokens for OTel observability (Snowflake-specific)
+        if usage_data.get("guard_tokens") is not None:
+            response_metadata["snowflake_guard_tokens"] = usage_data["guard_tokens"]
+
         ai_message = AIMessage(
             content=full_content,
             tool_calls=tool_calls if tool_calls else [],
             additional_kwargs={"usage": usage_data},
+            response_metadata=response_metadata,
         )
 
         # Create metadata dict inline (avoiding dependency on create_metadata)
@@ -510,16 +545,27 @@ The goal is to provide the most helpful, accurate, and relevant information to t
         return self._parse_rest_api_response(response_or_data, original_messages)
 
     def _parse_direct_response(self, data: dict[str, Any]) -> ChatResult:
-        """Parse a direct JSON response (non-streaming format) with content_list support."""
+        """Parse a direct JSON response (non-streaming format) with content_list support.
+        
+        PATCHED: Extracts Cortex Inference metadata for OTel observability:
+        - request_id from response 'id' field
+        - finish_reason from choices[0].finish_reason
+        - guard_tokens from usage.guard_tokens
+        """
         full_content = ""
         tool_calls = []
         usage_data = {}
+        finish_reason = None
 
         if "usage" in data:
             usage_data = data["usage"]
 
         choices = data.get("choices", [])
         for choice in choices:
+            # PATCH: Extract finish_reason for OTel observability
+            if "finish_reason" in choice:
+                finish_reason = choice["finish_reason"]
+            
             message = choice.get("message", choice.get("delta", {}))
             if message:
                 if message.get("role") == "assistant" or "content" in message or "content_list" in message:
@@ -542,10 +588,33 @@ The goal is to provide the most helpful, accurate, and relevant information to t
                     if "tool_calls" in message:
                         tool_calls.extend(message["tool_calls"])
 
+        # PATCH: Build response_metadata with Cortex Inference observability fields
+        # These fields are extracted by OTel instrumentation in callback_handler.py
+        response_metadata = {
+            "model_name": data.get("model", getattr(self, "model", "unknown")),
+        }
+        
+        # PATCH: Add request_id for OTel observability (maps to gen_ai.response.id)
+        if "id" in data:
+            response_metadata["snowflake_request_id"] = data["id"]
+        
+        # PATCH: Add finish_reason for OTel observability (maps to gen_ai.response.finish_reasons)
+        if finish_reason:
+            response_metadata["finish_reason"] = finish_reason
+        elif tool_calls:
+            response_metadata["finish_reason"] = "tool_calls"
+        else:
+            response_metadata["finish_reason"] = "stop"
+        
+        # PATCH: Add guard_tokens for OTel observability (Snowflake-specific)
+        if usage_data.get("guard_tokens") is not None:
+            response_metadata["snowflake_guard_tokens"] = usage_data["guard_tokens"]
+
         ai_message = AIMessage(
             content=full_content,
             tool_calls=tool_calls,
             additional_kwargs={"usage": usage_data},
+            response_metadata=response_metadata,
         )
 
         # Create metadata dict inline (avoiding dependency on create_metadata)

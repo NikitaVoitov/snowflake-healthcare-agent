@@ -9,6 +9,7 @@
 # 5. Non-streaming response parsing (tool_calls not extracted from non-streaming responses)
 # 6. Tool import fix for langchain 1.2.0+ compatibility (langchain_core.tools.Tool)
 # 7. Retrievers: Add _snowflake_request_id to Document metadata for OTel tracing
+# 8. Utils: Add request_id, finish_reason, guard_tokens to response_metadata for OTel observability
 #
 # Usage: ./patches/apply_patches.sh
 
@@ -68,6 +69,11 @@ if [ ! -f "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py.original" ]; then
     cp "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py" "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py.original"
 fi
 
+if [ ! -f "$LANGCHAIN_SNOWFLAKE_DIR/utils.py.original" ]; then
+    echo "💾 Backing up original utils.py..."
+    cp "$LANGCHAIN_SNOWFLAKE_DIR/utils.py" "$LANGCHAIN_SNOWFLAKE_DIR/utils.py.original"
+fi
+
 # Apply patches
 echo "🔧 Applying streaming.py patch (ToolCallChunk + fake streaming fix)..."
 cp "$SCRIPT_DIR/langchain_snowflake_streaming_patched.py" "$LANGCHAIN_SNOWFLAKE_DIR/streaming.py"
@@ -83,6 +89,9 @@ cp "$SCRIPT_DIR/langchain_snowflake_mcp_integration_patched.py" "$LANGCHAIN_SNOW
 
 echo "🔧 Applying retrievers.py patch (_snowflake_request_id propagation)..."
 cp "$SCRIPT_DIR/langchain_snowflake_retrievers_patched.py" "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py"
+
+echo "🔧 Applying utils.py patch (Cortex Inference metadata for OTel observability)..."
+cp "$SCRIPT_DIR/langchain_snowflake_utils_patched.py" "$LANGCHAIN_SNOWFLAKE_DIR/utils.py"
 
 echo ""
 echo "✅ Patches applied successfully!"
@@ -100,6 +109,10 @@ echo "  6. mcp_integration.py: Fixed Tool import for langchain 1.2.0+ compatibil
 echo "              (from langchain_core.tools import Tool)"
 echo "  7. retrievers.py: Added _snowflake_request_id to Document metadata"
 echo "              Enables OTel tracing of Cortex Search API calls"
+echo "  8. utils.py: Added request_id, guard_tokens to SnowflakeMetadataFactory"
+echo "  9. tools.py: Extracts Cortex Inference metadata (request_id, finish_reason, guard_tokens)"
+echo "              Enables OTel observability for LLM completions via gen_ai.response.id,"
+echo "              gen_ai.response.finish_reasons, and snowflake.inference.guard_tokens"
 echo ""
 echo "To revert patches:"
 echo "  ./patches/revert_patches.sh"
