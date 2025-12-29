@@ -145,5 +145,5 @@ traces/
 fixed_traces/
 unknown_model_traces/
 no_tools_attrs_trace/
-/splunk-otel-python-contrib/
+/splunk-otel-python-contrib
 /traces_cortex_analyst
