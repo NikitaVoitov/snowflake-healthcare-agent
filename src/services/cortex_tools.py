@@ -73,29 +73,34 @@ class AsyncCortexAnalystTool:
         """
         self.session = session
 
-    def _extract_sql_from_response(self, parsed: dict) -> tuple[str | None, str | None, list[str]]:
-        """Extract SQL, text explanation, and suggestions from SnowflakeCortexAnalyst response.
+    def _extract_sql_from_response(self, parsed: dict) -> tuple[str | None, str | None, list[str], dict[str, Any] | None]:
+        """Extract SQL, text explanation, suggestions, and verified query info from response.
 
         Args:
             parsed: Parsed JSON response from SnowflakeCortexAnalyst._arun()
 
         Returns:
-            Tuple of (sql_statement, text_explanation, suggestions)
+            Tuple of (sql_statement, text_explanation, suggestions, verified_query_used)
         """
         sql = None
         text = None
         suggestions: list[str] = []
+        verified_query_used: dict[str, Any] | None = None
 
         for item in parsed.get("content", []):
             item_type = item.get("type")
             if item_type == "sql":
                 sql = item.get("statement")
+                # Extract verified_query_used from confidence object if present
+                confidence = item.get("confidence", {})
+                if confidence and "verified_query_used" in confidence:
+                    verified_query_used = confidence["verified_query_used"]
             elif item_type == "text":
                 text = item.get("text")
             elif item_type == "suggestions":
                 suggestions = item.get("suggestions", [])
 
-        return sql, text, suggestions
+        return sql, text, suggestions, verified_query_used
 
     async def execute(self, query: str, member_id: str | None = None) -> dict[str, Any]:
         """Execute natural language query using Cortex Analyst.
@@ -157,10 +162,19 @@ class AsyncCortexAnalystTool:
                 "raw_response": json_result[:500] if json_result else None,
             }
 
-        # Extract SQL, text, and suggestions from response
-        sql, interpretation, suggestions = self._extract_sql_from_response(parsed)
+        # Extract SQL, text, suggestions, and verified query info from response
+        sql, interpretation, suggestions, verified_query_used = self._extract_sql_from_response(parsed)
 
-        # Build result structure
+        # Extract metadata for observability
+        metadata = parsed.get("metadata", {})
+        model_names = metadata.get("model_names", [])
+        question_category = metadata.get("question_category")
+
+        # Determine semantic model type based on configuration
+        semantic_model = settings.cortex_analyst_semantic_model
+        semantic_model_type = "FILE_ON_STAGE" if semantic_model.startswith("@") else "SEMANTIC_VIEW"
+
+        # Build result structure with full observability metadata
         result: dict[str, Any] = {
             "member_id": member_id,
             "member_info": {},
@@ -174,6 +188,22 @@ class AsyncCortexAnalystTool:
             "suggestions": suggestions,
             "request_id": parsed.get("request_id"),
             "warnings": parsed.get("warnings", []),
+            # Cortex Analyst observability metadata
+            "cortex_analyst_metadata": {
+                "request_id": parsed.get("request_id"),
+                "model_names": model_names,
+                "question_category": question_category,
+                "verified_query_used": verified_query_used,
+                "semantic_model": {
+                    "name": semantic_model,
+                    "type": semantic_model_type,
+                },
+                "snowflake": {
+                    "database": settings.snowflake_database,
+                    "schema": settings.snowflake_schema,
+                    "warehouse": settings.snowflake_warehouse,
+                },
+            },
         }
 
         # Handle suggestions (ambiguous query)

@@ -123,8 +123,15 @@ async def search_knowledge(
 
 
 def _format_analyst_result(result: dict) -> str:
-    """Format Cortex Analyst result as a readable string."""
+    """Format Cortex Analyst result as a readable string with observability metadata.
+
+    The formatted string includes structured metadata markers that can be parsed
+    by instrumentation to extract Cortex Analyst metrics and trace correlation.
+    """
     parts = ["[Database Query Results]"]
+
+    # Extract Cortex Analyst observability metadata
+    cortex_metadata = result.get("cortex_analyst_metadata", {})
 
     # Handle aggregate results
     if result.get("aggregate_result"):
@@ -143,6 +150,8 @@ def _format_analyst_result(result: dict) -> str:
         else:
             parts.append(f"Query result: {agg}")
 
+        # Add metadata for aggregate results too
+        _append_cortex_analyst_metadata(parts, cortex_metadata, result)
         return "\n".join(parts)
 
     # Handle member-specific results
@@ -222,7 +231,76 @@ def _format_analyst_result(result: dict) -> str:
     if len(parts) == 1:
         parts.append("No specific data found for this query.")
 
+    # Add metadata for member-specific results
+    _append_cortex_analyst_metadata(parts, cortex_metadata, result)
     return "\n".join(parts)
+
+
+def _append_cortex_analyst_metadata(parts: list, cortex_metadata: dict, result: dict) -> None:
+    """Append Cortex Analyst observability metadata markers to the result.
+
+    These markers follow the same pattern as Cortex Search (@sources, @request_ids, etc.)
+    and can be parsed by instrumentation to extract Cortex Analyst metrics and trace correlation.
+    """
+    if not cortex_metadata:
+        return
+
+    parts.append("\n--- Cortex Analyst Metadata ---")
+
+    # Snowflake context
+    sf_ctx = cortex_metadata.get("snowflake", {})
+    if sf_ctx.get("database"):
+        parts.append(f"@snowflake.database: {sf_ctx['database']}")
+    if sf_ctx.get("schema"):
+        parts.append(f"@snowflake.schema: {sf_ctx['schema']}")
+    if sf_ctx.get("warehouse"):
+        parts.append(f"@snowflake.warehouse: {sf_ctx['warehouse']}")
+
+    # Semantic model info
+    sem_model = cortex_metadata.get("semantic_model", {})
+    if sem_model.get("name"):
+        parts.append(f"@cortex_analyst.semantic_model.name: {sem_model['name']}")
+    if sem_model.get("type"):
+        parts.append(f"@cortex_analyst.semantic_model.type: {sem_model['type']}")
+
+    # Request ID for correlation with Snowflake logs
+    if cortex_metadata.get("request_id"):
+        parts.append(f"@cortex_analyst.request_id: {cortex_metadata['request_id']}")
+
+    # Generated SQL (may be truncated for readability)
+    sql = result.get("sql")
+    if sql:
+        # Truncate very long SQL for the formatted output
+        sql_display = sql[:500] + "..." if len(sql) > 500 else sql
+        parts.append(f"@cortex_analyst.sql: {sql_display}")
+
+    # LLM models used
+    model_names = cortex_metadata.get("model_names", [])
+    if model_names:
+        parts.append(f"@cortex_analyst.model_names: {model_names}")
+
+    # Question category
+    if cortex_metadata.get("question_category"):
+        parts.append(f"@cortex_analyst.question_category: {cortex_metadata['question_category']}")
+
+    # Verified Query Repository (VQR) info
+    vqr = cortex_metadata.get("verified_query_used")
+    if vqr:
+        if vqr.get("name"):
+            parts.append(f"@cortex_analyst.verified_query.name: {vqr['name']}")
+        if vqr.get("question"):
+            parts.append(f"@cortex_analyst.verified_query.question: {vqr['question']}")
+        if vqr.get("sql"):
+            vqr_sql = vqr["sql"][:300] + "..." if len(vqr["sql"]) > 300 else vqr["sql"]
+            parts.append(f"@cortex_analyst.verified_query.sql: {vqr_sql}")
+        if vqr.get("verified_at"):
+            parts.append(f"@cortex_analyst.verified_query.verified_at: {vqr['verified_at']}")
+        if vqr.get("verified_by"):
+            parts.append(f"@cortex_analyst.verified_query.verified_by: {vqr['verified_by']}")
+
+    # Warnings count
+    warnings = result.get("warnings", [])
+    parts.append(f"@cortex_analyst.warnings_count: {len(warnings)}")
 
 
 def _format_search_results(results: list) -> str:
