@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json  # noqa: F401 (kept for backward compatibility if external code relies on this module re-exporting json)
 from dataclasses import asdict  # noqa: F401
-from typing import Any
+from typing import Any, Optional
 
 from opentelemetry import trace
 from opentelemetry.semconv._incubating.attributes import (
@@ -39,9 +39,24 @@ from ..attributes import (
     SERVER_PORT,
     # Snowflake Cortex Search provider-specific attributes
     SNOWFLAKE_CORTEX_SEARCH_REQUEST_ID,
+    SNOWFLAKE_CORTEX_SEARCH_TOP_SCORE,
     SNOWFLAKE_CORTEX_SEARCH_RESULT_COUNT,
     SNOWFLAKE_CORTEX_SEARCH_SOURCES,
-    SNOWFLAKE_CORTEX_SEARCH_TOP_SCORE,
+    # Snowflake Cortex Analyst provider-specific attributes
+    SNOWFLAKE_DATABASE,
+    SNOWFLAKE_SCHEMA,
+    SNOWFLAKE_WAREHOUSE,
+    SNOWFLAKE_CORTEX_ANALYST_REQUEST_ID,
+    SNOWFLAKE_CORTEX_ANALYST_SEMANTIC_MODEL_NAME,
+    SNOWFLAKE_CORTEX_ANALYST_SEMANTIC_MODEL_TYPE,
+    SNOWFLAKE_CORTEX_ANALYST_SQL,
+    SNOWFLAKE_CORTEX_ANALYST_MODEL_NAMES,
+    SNOWFLAKE_CORTEX_ANALYST_QUESTION_CATEGORY,
+    SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_NAME,
+    SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_QUESTION,
+    SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_SQL,
+    SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_VERIFIED_BY,
+    SNOWFLAKE_CORTEX_ANALYST_WARNINGS_COUNT,
 )
 from ..interfaces import EmitterMeta
 from ..span_context import extract_span_context, store_span_context
@@ -79,20 +94,24 @@ def _extract_snowflake_search_metadata(
 ) -> dict[str, Any]:
     """
     Extract Snowflake Cortex Search metadata from tool response.
-
+    
     Looks for patterns embedded in the tool response:
     - @top_cosine_similarity: 0.XXX
     - @scores: {cosine=X.XXX, text=X.XXX}
     - @sources: ["faqs", "policies", "transcripts"]
     - @request_ids: ["xxx", "yyy"]
     - Result count from "[Knowledge Search] Found N relevant result(s):"
-
+    - Snowflake context (database, schema, warehouse) from Cortex Search Metadata section
+    
     Returns a dict with extracted metadata for span attributes.
     """
     import re
-
+    
     result: dict[str, Any] = {}
-
+    
+    # Normalize escaped newlines for consistent regex matching
+    tool_response = tool_response.replace("\\n", "\n")
+    
     # Extract top cosine similarity score
     score_match = re.search(r"@top_cosine_similarity:\s*([\d.]+)", tool_response)
     if score_match:
@@ -100,7 +119,7 @@ def _extract_snowflake_search_metadata(
             result["top_score"] = float(score_match.group(1))
         except (ValueError, TypeError):
             pass
-
+    
     # Fallback: try to extract from cosine= pattern in @scores
     if "top_score" not in result:
         cosine_match = re.search(r"cosine[=:]\s*([\d.]+)", tool_response)
@@ -109,7 +128,7 @@ def _extract_snowflake_search_metadata(
                 result["top_score"] = float(cosine_match.group(1))
             except (ValueError, TypeError):
                 pass
-
+    
     # Extract sources list
     sources_match = re.search(r"@sources:\s*\[([^\]]+)\]", tool_response)
     if sources_match:
@@ -119,7 +138,7 @@ def _extract_snowflake_search_metadata(
         sources = [s for s in sources if s]  # Filter empty
         if sources:
             result["sources"] = sources
-
+    
     # Extract request IDs
     request_match = re.search(r"@request_ids:\s*\[([^\]]+)\]", tool_response)
     if request_match:
@@ -129,15 +148,190 @@ def _extract_snowflake_search_metadata(
         if request_ids:
             # Use first request_id for span attribute (typically same for one search)
             result["request_id"] = request_ids[0]
-
+    
     # Extract result count from "[Knowledge Search] Found N relevant result(s):"
-    count_match = re.search(r"\[Knowledge Search\]\s*Found\s+(\d+)\s+relevant", tool_response)
+    count_match = re.search(
+        r"\[Knowledge Search\]\s*Found\s+(\d+)\s+relevant", tool_response
+    )
     if count_match:
         try:
             result["result_count"] = int(count_match.group(1))
         except (ValueError, TypeError):
             pass
+    
+    # Extract Snowflake context from Cortex Search Metadata section
+    # These are the same attributes as Cortex Analyst for consistency
+    if "--- Cortex Search Metadata ---" in tool_response:
+        # Extract database - use \S+ to capture only the identifier (no spaces)
+        db_match = re.search(r"@snowflake\.database:\s*(\S+)", tool_response)
+        if db_match:
+            result["database"] = db_match.group(1).strip()
+        
+        # Extract schema
+        schema_match = re.search(r"@snowflake\.schema:\s*(\S+)", tool_response)
+        if schema_match:
+            result["schema"] = schema_match.group(1).strip()
+        
+        # Extract warehouse
+        wh_match = re.search(r"@snowflake\.warehouse:\s*(\S+)", tool_response)
+        if wh_match:
+            result["warehouse"] = wh_match.group(1).strip()
+    
+    return result
 
+
+def _extract_snowflake_analyst_metadata(
+    tool_response: str,
+) -> dict[str, Any]:
+    """
+    Extract Snowflake Cortex Analyst metadata from tool response.
+    
+    Looks for patterns embedded in the tool response with @cortex_analyst.* prefixes:
+    - @snowflake.database: HEALTHCARE_DB
+    - @snowflake.schema: PUBLIC
+    - @snowflake.warehouse: WAREHOUSE_NAME
+    - @cortex_analyst.semantic_model.name: model_path
+    - @cortex_analyst.semantic_model.type: FILE_ON_STAGE|SEMANTIC_VIEW
+    - @cortex_analyst.request_id: uuid
+    - @cortex_analyst.sql: SQL_STATEMENT
+    - @cortex_analyst.model_names: ['model1', 'model2']
+    - @cortex_analyst.question_category: CLEAR_SQL|AMBIGUOUS|etc
+    - @cortex_analyst.verified_query.name: query_name
+    - @cortex_analyst.verified_query.question: original_question
+    - @cortex_analyst.verified_query.sql: verified_sql
+    - @cortex_analyst.verified_query.verified_by: user
+    - @cortex_analyst.warnings_count: N
+    
+    Returns a dict with extracted metadata for span attributes.
+    """
+    import re
+    
+    result: dict[str, Any] = {}
+    
+    # Check if this is a Cortex Analyst response (has the metadata section)
+    if "--- Cortex Analyst Metadata ---" not in tool_response:
+        return result
+    
+    # Normalize escaped newlines to real newlines for consistent parsing
+    # This handles cases where the string was JSON-serialized/deserialized
+    normalized = tool_response.replace("\\n", "\n")
+    
+    # Helper to extract single-line value (stops at newline or end)
+    def extract_value(pattern: str, text: str) -> str | None:
+        match = re.search(pattern, text)
+        if match:
+            value = match.group(1).strip()
+            # Clean up any trailing markers that might have been captured
+            if value.endswith('"'):
+                value = value.rstrip('"')
+            return value
+        return None
+    
+    # Extract Snowflake context - use \S+ for simple identifier values
+    db = extract_value(r"@snowflake\.database:\s*(\S+)", normalized)
+    if db:
+        result["database"] = db
+    
+    schema = extract_value(r"@snowflake\.schema:\s*(\S+)", normalized)
+    if schema:
+        result["schema"] = schema
+    
+    warehouse = extract_value(r"@snowflake\.warehouse:\s*(\S+)", normalized)
+    if warehouse:
+        result["warehouse"] = warehouse
+    
+    # Extract semantic model info
+    model_name = extract_value(
+        r"@cortex_analyst\.semantic_model\.name:\s*([^\n]+)", normalized
+    )
+    if model_name:
+        result["semantic_model_name"] = model_name
+    
+    model_type = extract_value(
+        r"@cortex_analyst\.semantic_model\.type:\s*([^\n]+)", normalized
+    )
+    if model_type:
+        result["semantic_model_type"] = model_type
+    
+    # Extract request ID
+    request_id = extract_value(
+        r"@cortex_analyst\.request_id:\s*([^\n]+)", normalized
+    )
+    if request_id:
+        result["request_id"] = request_id
+    
+    # Extract SQL (may be multiline, capture until next @cortex_analyst. marker)
+    sql_match = re.search(
+        r"@cortex_analyst\.sql:\s*(.+?)(?=\n@cortex_analyst\.)", 
+        normalized, 
+        re.DOTALL
+    )
+    if sql_match:
+        sql = sql_match.group(1).strip()
+        # Truncate very long SQL for span attributes (8KB limit recommended)
+        if len(sql) > 4096:
+            sql = sql[:4096] + "..."
+        result["sql"] = sql
+    
+    # Extract model names (list format)
+    model_names_match = re.search(
+        r"@cortex_analyst\.model_names:\s*\[([^\]]+)\]", normalized
+    )
+    if model_names_match:
+        names_str = model_names_match.group(1)
+        names = [n.strip().strip("'\"") for n in names_str.split(",")]
+        names = [n for n in names if n]
+        if names:
+            result["model_names"] = ",".join(names)
+    
+    # Extract question category
+    category = extract_value(
+        r"@cortex_analyst\.question_category:\s*([^\n]+)", normalized
+    )
+    if category:
+        result["question_category"] = category
+    
+    # Extract verified query info
+    vq_name = extract_value(
+        r"@cortex_analyst\.verified_query\.name:\s*([^\n]+)", normalized
+    )
+    if vq_name:
+        result["verified_query_name"] = vq_name
+    
+    vq_question = extract_value(
+        r"@cortex_analyst\.verified_query\.question:\s*([^\n]+)", normalized
+    )
+    if vq_question:
+        result["verified_query_question"] = vq_question
+    
+    # Extract verified query SQL (may be multiline)
+    vq_sql_match = re.search(
+        r"@cortex_analyst\.verified_query\.sql:\s*(.+?)(?=\n@cortex_analyst\.)", 
+        normalized, 
+        re.DOTALL
+    )
+    if vq_sql_match:
+        vq_sql = vq_sql_match.group(1).strip()
+        if len(vq_sql) > 2048:
+            vq_sql = vq_sql[:2048] + "..."
+        result["verified_query_sql"] = vq_sql
+    
+    vq_verified_by = extract_value(
+        r"@cortex_analyst\.verified_query\.verified_by:\s*([^\n]+)", normalized
+    )
+    if vq_verified_by:
+        result["verified_query_verified_by"] = vq_verified_by
+    
+    # Extract warnings count
+    warnings_match = re.search(
+        r"@cortex_analyst\.warnings_count:\s*(\d+)", normalized
+    )
+    if warnings_match:
+        try:
+            result["warnings_count"] = int(warnings_match.group(1))
+        except (ValueError, TypeError):
+            pass
+    
     return result
 
 
@@ -649,51 +843,151 @@ class SpanEmitter(EmitterMeta):
 
     def _finish_tool_call(self, tool: ToolCall) -> None:
         """Finish a tool call span with result attributes.
-
-        Also extracts and applies Snowflake Cortex Search provider-specific
-        attributes when the tool response contains search metadata.
+        
+        Also extracts and applies Snowflake Cortex provider-specific
+        attributes when the tool response contains search/analyst metadata.
         """
         span = tool.span
         if span is None:
             return
-
+        
         tool_response = tool.attributes.get("tool.response")
-
+        
         # Add tool result if capture_content enabled and response available
         if self._capture_content and tool_response:
             span.set_attribute("gen_ai.tool.call.result", tool_response)
-
-        # Extract and apply Snowflake Cortex Search metadata if present
-        # This adds provider-specific observability attributes for search tools
+        
+        # Extract and apply Snowflake Cortex metadata if present
+        # This adds provider-specific observability attributes for Cortex tools
         if tool_response and isinstance(tool_response, str):
-            snowflake_metadata = _extract_snowflake_search_metadata(tool_response)
-
-            if snowflake_metadata:
-                # Set Snowflake-specific span attributes
-                if "request_id" in snowflake_metadata:
+            # Check for Cortex Search metadata
+            search_metadata = _extract_snowflake_search_metadata(tool_response)
+            
+            if search_metadata:
+                # Set Snowflake context attributes (shared with Cortex Analyst)
+                if "database" in search_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_DATABASE,
+                        search_metadata["database"],
+                    )
+                if "schema" in search_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_SCHEMA,
+                        search_metadata["schema"],
+                    )
+                if "warehouse" in search_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_WAREHOUSE,
+                        search_metadata["warehouse"],
+                    )
+                
+                # Set Snowflake Cortex Search specific span attributes
+                if "request_id" in search_metadata:
                     span.set_attribute(
                         SNOWFLAKE_CORTEX_SEARCH_REQUEST_ID,
-                        snowflake_metadata["request_id"],
+                        search_metadata["request_id"],
                     )
-                if "top_score" in snowflake_metadata:
+                if "top_score" in search_metadata:
                     span.set_attribute(
                         SNOWFLAKE_CORTEX_SEARCH_TOP_SCORE,
-                        snowflake_metadata["top_score"],
+                        search_metadata["top_score"],
                     )
-                if "result_count" in snowflake_metadata:
+                if "result_count" in search_metadata:
                     span.set_attribute(
                         SNOWFLAKE_CORTEX_SEARCH_RESULT_COUNT,
-                        snowflake_metadata["result_count"],
+                        search_metadata["result_count"],
                     )
-                if "sources" in snowflake_metadata:
+                if "sources" in search_metadata:
                     # Join sources as comma-separated string for span attribute
                     span.set_attribute(
                         SNOWFLAKE_CORTEX_SEARCH_SOURCES,
-                        ",".join(snowflake_metadata["sources"]),
+                        ",".join(search_metadata["sources"]),
                     )
-
+            
+            # Check for Cortex Analyst metadata
+            analyst_metadata = _extract_snowflake_analyst_metadata(tool_response)
+            
+            if analyst_metadata:
+                # Set Snowflake context attributes
+                if "database" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_DATABASE,
+                        analyst_metadata["database"],
+                    )
+                if "schema" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_SCHEMA,
+                        analyst_metadata["schema"],
+                    )
+                if "warehouse" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_WAREHOUSE,
+                        analyst_metadata["warehouse"],
+                    )
+                
+                # Set Cortex Analyst specific attributes
+                if "request_id" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_REQUEST_ID,
+                        analyst_metadata["request_id"],
+                    )
+                if "semantic_model_name" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_SEMANTIC_MODEL_NAME,
+                        analyst_metadata["semantic_model_name"],
+                    )
+                if "semantic_model_type" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_SEMANTIC_MODEL_TYPE,
+                        analyst_metadata["semantic_model_type"],
+                    )
+                if "sql" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_SQL,
+                        analyst_metadata["sql"],
+                    )
+                if "model_names" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_MODEL_NAMES,
+                        analyst_metadata["model_names"],
+                    )
+                if "question_category" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_QUESTION_CATEGORY,
+                        analyst_metadata["question_category"],
+                    )
+                
+                # Verified Query attributes
+                if "verified_query_name" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_NAME,
+                        analyst_metadata["verified_query_name"],
+                    )
+                if "verified_query_question" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_QUESTION,
+                        analyst_metadata["verified_query_question"],
+                    )
+                if "verified_query_sql" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_SQL,
+                        analyst_metadata["verified_query_sql"],
+                    )
+                if "verified_query_verified_by" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_VERIFIED_BY,
+                        analyst_metadata["verified_query_verified_by"],
+                    )
+                if "warnings_count" in analyst_metadata:
+                    span.set_attribute(
+                        SNOWFLAKE_CORTEX_ANALYST_WARNINGS_COUNT,
+                        analyst_metadata["warnings_count"],
+                    )
+        
         # Apply any semconv attributes from the tool
-        _apply_gen_ai_semconv_attributes(span, tool.semantic_convention_attributes())
+        _apply_gen_ai_semconv_attributes(
+            span, tool.semantic_convention_attributes()
+        )
         token = tool.context_token
         if token is not None and hasattr(token, "__exit__"):
             try:

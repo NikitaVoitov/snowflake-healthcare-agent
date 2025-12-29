@@ -8,7 +8,8 @@
 # 4. Tool call ID extraction
 # 5. Provider name inheritance for tools
 # 6. Snowflake Cortex Search provider-specific attributes
-# 7. Search score histogram metric
+# 7. Snowflake Cortex Analyst provider-specific attributes
+# 8. Search score histogram metric
 #
 # Usage: ./apply_patches.sh [VENV_PATH]
 #   VENV_PATH: Optional path to virtual environment (defaults to .venv)
@@ -100,7 +101,7 @@ cp "$SCRIPT_DIR/types_patched.py" "$UTIL_GENAI/types.py"
 echo "   ✓ Applied types.py patch"
 
 cp "$SCRIPT_DIR/attributes_patched.py" "$UTIL_GENAI/attributes.py"
-echo "   ✓ Applied attributes.py patch (Snowflake Cortex Search attributes)"
+echo "   ✓ Applied attributes.py patch (Snowflake Cortex Search & Analyst attributes)"
 
 cp "$SCRIPT_DIR/instruments_patched.py" "$UTIL_GENAI/instruments.py"
 echo "   ✓ Applied instruments.py patch (search score histogram)"
@@ -126,14 +127,26 @@ echo "  5. Provider inheritance for tools (gen_ai.provider.name on tool spans)"
 echo "     - Works for both multi-agent and single-workflow patterns"
 echo "     - Provider propagated to any parent context (Agent/Workflow/Step)"
 echo ""
-echo "New Snowflake Cortex Search observability:"
-echo "  6. snowflake.cortex_search.request_id - Request ID from Cortex Search API"
-echo "  7. snowflake.cortex_search.top_score - Top cosine similarity score"
-echo "  8. snowflake.cortex_search.result_count - Number of search results"
-echo "  9. snowflake.cortex_search.sources - Search sources (faqs, policies, etc.)"
-echo "  10. gen_ai.tool.search.score histogram metric with dimensions:"
-echo "      - gen_ai.tool.name"
-echo "      - gen_ai.provider.name"
-echo "      - snowflake.cortex_search.sources"
+echo "Snowflake Connection Context (shared):"
+echo "  6. snowflake.database - Snowflake database name"
+echo "  7. snowflake.schema - Snowflake schema name"
+echo "  8. snowflake.warehouse - Snowflake warehouse name"
+echo ""
+echo "Snowflake Cortex Search observability:"
+echo "  9. snowflake.cortex_search.request_id - Request ID from Cortex Search API"
+echo "  10. snowflake.cortex_search.top_score - Top cosine similarity score"
+echo "  11. snowflake.cortex_search.result_count - Number of search results"
+echo "  12. snowflake.cortex_search.sources - Search sources (faqs, policies, etc.)"
+echo "  13. gen_ai.tool.search.score histogram metric"
+echo ""
+echo "Snowflake Cortex Analyst observability:"
+echo "  14. snowflake.cortex_analyst.request_id - Request ID"
+echo "  15. snowflake.cortex_analyst.semantic_model.name - Semantic model path"
+echo "  16. snowflake.cortex_analyst.semantic_model.type - FILE_ON_STAGE or SEMANTIC_VIEW"
+echo "  17. snowflake.cortex_analyst.sql - Generated SQL (if capture_content)"
+echo "  18. snowflake.cortex_analyst.model_names - LLM models used"
+echo "  19. snowflake.cortex_analyst.question_category - Query classification"
+echo "  20. snowflake.cortex_analyst.verified_query.* - VQR match details"
+echo "  21. snowflake.cortex_analyst.warnings_count - Warning count"
 echo ""
 echo "To revert, run: ./revert_patches.sh"

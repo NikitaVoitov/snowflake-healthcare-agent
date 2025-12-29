@@ -63,6 +63,16 @@ SERVER_PORT = "server.port"
 GEN_AI_SECURITY_EVENT_ID = "gen_ai.security.event_id"
 
 # ============================================================================
+# Snowflake Connection Context Attributes (Shared)
+# ============================================================================
+# These attributes capture the Snowflake connection context and are shared
+# between Cortex Search and Cortex Analyst for consistent observability.
+
+SNOWFLAKE_DATABASE = "snowflake.database"
+SNOWFLAKE_SCHEMA = "snowflake.schema"
+SNOWFLAKE_WAREHOUSE = "snowflake.warehouse"
+
+# ============================================================================
 # Snowflake Cortex Search Provider-Specific Attributes
 # ============================================================================
 # These attributes capture metadata specific to Snowflake Cortex Search
@@ -83,3 +93,34 @@ SNOWFLAKE_CORTEX_SEARCH_RESULT_COUNT = "snowflake.cortex_search.result_count"
 # Sources (services) that were searched
 # Examples: "faqs", "policies", "transcripts"
 SNOWFLAKE_CORTEX_SEARCH_SOURCES = "snowflake.cortex_search.sources"
+
+# ============================================================================
+# Snowflake Cortex Analyst Provider-Specific Attributes
+# ============================================================================
+# These attributes capture metadata specific to Snowflake Cortex Analyst
+# (NL→SQL) service responses, enabling detailed observability for analytics.
+
+# Request identifier from Snowflake Cortex Analyst REST API
+SNOWFLAKE_CORTEX_ANALYST_REQUEST_ID = "snowflake.cortex_analyst.request_id"
+
+# Semantic model information
+SNOWFLAKE_CORTEX_ANALYST_SEMANTIC_MODEL_NAME = "snowflake.cortex_analyst.semantic_model.name"
+SNOWFLAKE_CORTEX_ANALYST_SEMANTIC_MODEL_TYPE = "snowflake.cortex_analyst.semantic_model.type"
+
+# Generated SQL query (if capture_content enabled)
+SNOWFLAKE_CORTEX_ANALYST_SQL = "snowflake.cortex_analyst.sql"
+
+# LLM models used for the query (comma-separated)
+SNOWFLAKE_CORTEX_ANALYST_MODEL_NAMES = "snowflake.cortex_analyst.model_names"
+
+# How the question was classified (CLEAR_SQL, AMBIGUOUS, etc.)
+SNOWFLAKE_CORTEX_ANALYST_QUESTION_CATEGORY = "snowflake.cortex_analyst.question_category"
+
+# Verified Query Repository (VQR) match information
+SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_NAME = "snowflake.cortex_analyst.verified_query.name"
+SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_QUESTION = "snowflake.cortex_analyst.verified_query.question"
+SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_SQL = "snowflake.cortex_analyst.verified_query.sql"
+SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_VERIFIED_BY = "snowflake.cortex_analyst.verified_query.verified_by"
+
+# Number of warnings returned by Cortex Analyst
+SNOWFLAKE_CORTEX_ANALYST_WARNINGS_COUNT = "snowflake.cortex_analyst.warnings_count"
