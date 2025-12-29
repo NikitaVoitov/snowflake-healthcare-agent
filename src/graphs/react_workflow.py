@@ -19,6 +19,12 @@ Error Handling Strategy (per LangGraph best practices):
 - Unexpected errors: Let them bubble up for debugging
 """
 
+# Initialize OpenTelemetry instrumentation BEFORE any LangChain imports
+# This enables telemetry capture when running via langgraph dev
+from src.otel_setup import setup_opentelemetry
+
+setup_opentelemetry()
+
 import asyncio
 import logging
 from typing import Literal
@@ -181,7 +187,8 @@ def _build_chat_messages(state: HealthcareAgentState) -> list[BaseMessage]:
 
     Builds a message list with:
     1. System message containing healthcare context and tool guidance
-    2. Existing messages from state (HumanMessage, AIMessage, ToolMessage)
+    2. User query as HumanMessage (if not already in messages)
+    3. Existing messages from state (AIMessage, ToolMessage)
 
     Args:
         state: Current graph state with messages and context.
@@ -189,6 +196,8 @@ def _build_chat_messages(state: HealthcareAgentState) -> list[BaseMessage]:
     Returns:
         List of messages ready for ChatSnowflake.ainvoke().
     """
+    from langchain_core.messages import HumanMessage
+
     messages: list[BaseMessage] = []
 
     # Build system message with context
@@ -198,8 +207,15 @@ def _build_chat_messages(state: HealthcareAgentState) -> list[BaseMessage]:
     )
     messages.append(SystemMessage(content=system_content))
 
-    # Add existing messages (HumanMessage, AIMessage with tool_calls, ToolMessage)
+    # Add existing messages (AIMessage with tool_calls, ToolMessage, etc.)
     existing_messages = state.get("messages", [])
+
+    # Check if we need to add the initial HumanMessage
+    # (On first call, messages is empty but user_query is set)
+    has_human_message = any(isinstance(m, HumanMessage) for m in existing_messages)
+    if not has_human_message and state.get("user_query"):
+        messages.append(HumanMessage(content=state["user_query"]))
+
     messages.extend(existing_messages)
 
     return messages
@@ -465,5 +481,10 @@ def compile_react_graph(checkpointer=None):
 # It is lazy-initialized on first request via _ensure_snowpark_session_async()
 # This allows the event loop to be properly running when we make async calls.
 
-# Export compiled graph for langgraph.json
+# NOTE: For langgraph dev mode, do NOT pass any checkpointer.
+# LangGraph API handles persistence automatically - custom checkpointers are REJECTED.
+# To customize persistence, set POSTGRES_URI environment variable.
+# See: https://langchain-ai.github.io/langgraph/cloud/reference/env_var/#postgres_uri_custom
+
+# Export compiled graph for langgraph.json (no checkpointer - LangGraph API manages it)
 react_healthcare_graph = build_react_graph().compile()

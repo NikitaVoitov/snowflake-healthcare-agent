@@ -155,10 +155,7 @@ async def _create_spcs_chat_model(model: str, temperature: float) -> ChatSnowfla
     """
     session = _cached_session
     if session is None:
-        raise ValueError(
-            "No Snowpark session available in SPCS mode. "
-            "Ensure main.py calls llm_service.set_session() during startup."
-        )
+        raise ValueError("No Snowpark session available in SPCS mode. Ensure main.py calls llm_service.set_session() during startup.")
 
     account, user = _get_session_info(session)
     logger.info(
@@ -309,18 +306,12 @@ async def _create_local_chat_model(model: str, temperature: float) -> ChatSnowfl
 
     logger.debug("Snowpark session ready for ChatSnowflake")
 
+    # Use session-only mode - REST API private key auth has issues with "Password is empty" error
+    # Tool calling works via session's SQL mode
     return ChatSnowflake(
         model=model,
         temperature=temperature,
-        session=session,  # For SQL mode
-        # For REST API mode (tool calling):
-        account=settings.snowflake_account,
-        user=settings.snowflake_user,
-        private_key_path=settings.snowflake_private_key_path,
-        private_key_passphrase=settings.snowflake_private_key_passphrase,
-        # Database context
-        database=settings.snowflake_database,
-        warehouse=settings.snowflake_warehouse,
+        session=session,
         # Disable streaming by default to avoid "No generations found in stream" error
         # Set ENABLE_LLM_STREAMING=true after applying langchain-snowflake patches
         disable_streaming=not ENABLE_LLM_STREAMING,

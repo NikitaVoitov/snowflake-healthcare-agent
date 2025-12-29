@@ -659,20 +659,40 @@ class AsyncCortexSearchTool:
 
         Returns:
             List of dicts with text, score, source, metadata.
+            Metadata includes @scores (cosine_similarity, text_match) and _snowflake_request_id.
         """
         results = []
+        # Keys to exclude from text representation (metadata-only fields)
+        exclude_keys = {
+            "@scores",  # Cortex Search scoring metadata
+            "_formatted_for_rag",
+            "_original_page_content",
+            "_content_field_used",
+            "_snowflake_request_id",  # Snowflake request tracking ID
+        }
+
         for doc in docs:
             # Combine metadata fields into text (same format as before)
             text_parts = []
             for key, val in doc.metadata.items():
-                if key not in ["@search_score", "_formatted_for_rag", "_original_page_content", "_content_field_used"] and val:
+                if key not in exclude_keys and val:
                     text_parts.append(f"{key}: {val}")
             text = " | ".join(text_parts)[:5000]
+
+            # Extract @scores properly (Snowflake returns @scores dict, not @search_score)
+            scores = doc.metadata.get("@scores", {})
+            cosine_similarity = scores.get("cosine_similarity") if isinstance(scores, dict) else None
+            text_match = scores.get("text_match") if isinstance(scores, dict) else None
+
+            # Use cosine_similarity as primary score, fallback to 0.9
+            primary_score = cosine_similarity if cosine_similarity is not None else 0.9
 
             results.append(
                 {
                     "text": text,
-                    "score": doc.metadata.get("@search_score", 0.9),
+                    "score": primary_score,
+                    "cosine_similarity": cosine_similarity,
+                    "text_match": text_match,
                     "source": self._source_to_key(source),  # "faqs", "policies", "transcripts"
                     "metadata": doc.metadata,
                 }

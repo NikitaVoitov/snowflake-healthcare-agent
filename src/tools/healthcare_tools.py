@@ -197,30 +197,13 @@ def _format_analyst_result(result: dict) -> str:
     if claims:
         parts.append(f"--- Claims ({len(claims)} found) ---")
         for claim in claims[:5]:
-            service = (
-                claim.get("CLAIM_SERVICE") or claim.get("claim_service") or 
-                claim.get("service") or "Unknown"
-            )
-            billed = (
-                claim.get("CLAIM_BILL_AMT") or claim.get("claim_bill_amt") or
-                claim.get("claim_billed_amount") or claim.get("amount")
-            )
-            paid = (
-                claim.get("CLAIM_PAID_AMT") or claim.get("claim_paid_amt") or
-                claim.get("claim_paid_amount")
-            )
-            status = (
-                claim.get("CLAIM_STATUS") or claim.get("claim_status") or 
-                claim.get("status") or "N/A"
-            )
-            provider = (
-                claim.get("CLAIM_PROVIDER") or claim.get("claim_provider") or
-                claim.get("provider")
-            )
-            claim_id = (
-                claim.get("CLAIM_ID") or claim.get("claim_id")
-            )
-            
+            service = claim.get("CLAIM_SERVICE") or claim.get("claim_service") or claim.get("service") or "Unknown"
+            billed = claim.get("CLAIM_BILL_AMT") or claim.get("claim_bill_amt") or claim.get("claim_billed_amount") or claim.get("amount")
+            paid = claim.get("CLAIM_PAID_AMT") or claim.get("claim_paid_amt") or claim.get("claim_paid_amount")
+            status = claim.get("CLAIM_STATUS") or claim.get("claim_status") or claim.get("status") or "N/A"
+            provider = claim.get("CLAIM_PROVIDER") or claim.get("claim_provider") or claim.get("provider")
+            claim_id = claim.get("CLAIM_ID") or claim.get("claim_id")
+
             # Build claim line with available info
             line = f"  - {service}"
             if claim_id:
@@ -243,30 +226,77 @@ def _format_analyst_result(result: dict) -> str:
 
 
 def _format_search_results(results: list) -> str:
-    """Format Cortex Search results as a readable string."""
+    """Format Cortex Search results as a readable string with preserved metadata.
+
+    The formatted string includes structured metadata markers that can be parsed
+    by instrumentation to extract Cortex Search metrics like scores and request IDs.
+    """
     if not results:
         return "[Knowledge Search] No relevant documents found."
 
     # Sort by source priority (transcripts > policies > faqs)
     def sort_key(item: dict) -> tuple:
         source = item.get("source", "")
-        score = item.get("score", 0)
+        # Use cosine_similarity as primary score if available
+        metadata = item.get("metadata", {})
+        scores = metadata.get("@scores", {})
+        score = scores.get("cosine_similarity", item.get("score", 0))
         source_priority = 0 if source == "transcripts" else 1 if source == "policies" else 2
-        return (source_priority, -score)
+        return (source_priority, -score if isinstance(score, (int, float)) else 0)
 
     sorted_results = sorted(results, key=sort_key)
 
     parts = [f"[Knowledge Search] Found {len(results)} relevant result(s):"]
 
+    # Collect metrics for instrumentation visibility
+    all_scores = []
+    request_ids = set()
+    sources_searched = set()
+
     for i, item in enumerate(sorted_results[:5], 1):
         source = item.get("source", "unknown")
+        sources_searched.add(source)
         text = item.get("text", "")
         if len(text) > 300:
             text = text[:300] + "..."
-        parts.append(f"\n{i}. [{source}]: {text}")
+
+        # Extract scores from metadata for display
+        metadata = item.get("metadata", {})
+        scores = metadata.get("@scores", {})
+        cosine_sim = scores.get("cosine_similarity")
+        text_match = scores.get("text_match")
+
+        # Collect request_id if available
+        req_id = metadata.get("_snowflake_request_id")
+        if req_id:
+            request_ids.add(req_id)
+
+        # Build result line with score info
+        score_info = ""
+        if cosine_sim is not None or text_match is not None:
+            score_parts = []
+            if cosine_sim is not None:
+                score_parts.append(f"cosine={cosine_sim:.3f}")
+                all_scores.append({"cosine_similarity": cosine_sim, "text_match": text_match})
+            if text_match is not None:
+                score_parts.append(f"text={text_match:.3f}")
+            score_info = f" @scores: {{{', '.join(score_parts)}}}"
+
+        parts.append(f"\n{i}. [{source}]: {text}{score_info}")
 
     if len(results) > 5:
         parts.append(f"\n... and {len(results) - 5} more results")
+
+    # Add metadata summary at end for instrumentation parsing
+    if request_ids:
+        parts.append(f"\n@request_ids: {list(request_ids)}")
+    if sources_searched:
+        parts.append(f"\n@sources: {list(sources_searched)}")
+
+    # Add top score summary
+    if all_scores:
+        top_cosine = max((s.get("cosine_similarity", 0) or 0) for s in all_scores)
+        parts.append(f"\n@top_cosine_similarity: {top_cosine:.3f}")
 
     return "\n".join(parts)
 
