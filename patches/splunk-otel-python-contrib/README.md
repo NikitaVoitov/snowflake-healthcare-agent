@@ -97,10 +97,18 @@ workflow (root) ← Provider needed HERE for all branches
 
 **Enhancement:**
 Added Snowflake-specific span attributes to capture this metadata:
-- `snowflake.cortex_search.request_id`
-- `snowflake.cortex_search.top_score`
-- `snowflake.cortex_search.result_count`
-- `snowflake.cortex_search.sources`
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `snowflake.database` | string | Target database (shared with Cortex Analyst) |
+| `snowflake.schema` | string | Target schema (shared with Cortex Analyst) |
+| `snowflake.warehouse` | string | Compute warehouse (shared with Cortex Analyst) |
+| `snowflake.cortex_search.request_id` | string | Snowflake request ID for correlation |
+| `snowflake.cortex_search.top_score` | float | Top cosine similarity score |
+| `snowflake.cortex_search.result_count` | int | Number of matching documents |
+| `snowflake.cortex_search.sources` | string | Comma-separated sources searched |
+
+**Note:** The `snowflake.database`, `snowflake.schema`, and `snowflake.warehouse` attributes are shared between Cortex Search and Cortex Analyst for consistent observability across both services.
 
 **Files Changed:**
 - `attributes.py`: Added Snowflake Cortex Search attribute constants
@@ -129,14 +137,53 @@ This enables:
 - `instruments.py`: Added `tool_search_score_histogram` with `explicit_bucket_boundaries_advisory` for cosine similarity (0.0-1.0)
 - `metrics.py`: Added `_extract_search_score_from_tool_response()` and `_record_search_score_metric()` with exemplar context linking
 
+### 8. Snowflake Cortex Analyst Provider-Specific Attributes (Enhancement)
+
+**Problem:** Snowflake Cortex Analyst API returns rich metadata for NL→SQL conversion that wasn't captured for observability.
+
+**Cortex Analyst API returns:**
+- `request_id` - Unique request identifier for API tracing/correlation
+- `metadata.model_names` - LLM models used for SQL generation
+- `metadata.question_category` - How the question was classified (CLEAR_SQL, AMBIGUOUS, etc.)
+- `confidence.verified_query_used` - Details about matched Verified Query Repository entry
+- `warnings` - Any warnings during SQL generation
+- `sql` - The generated SQL query
+
+**Enhancement:**
+Added 14 Snowflake Cortex Analyst span attributes to capture this metadata:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `snowflake.database` | string | Target database |
+| `snowflake.schema` | string | Target schema |
+| `snowflake.warehouse` | string | Compute warehouse |
+| `snowflake.cortex_analyst.request_id` | string | Snowflake request ID for correlation |
+| `snowflake.cortex_analyst.semantic_model.name` | string | Semantic model path or view name |
+| `snowflake.cortex_analyst.semantic_model.type` | string | `FILE_ON_STAGE` or `SEMANTIC_VIEW` |
+| `snowflake.cortex_analyst.sql` | string | Generated SQL (if capture_content enabled) |
+| `snowflake.cortex_analyst.model_names` | string | LLM models used (comma-separated) |
+| `snowflake.cortex_analyst.question_category` | string | Question classification |
+| `snowflake.cortex_analyst.verified_query.name` | string | Matched VQR entry name |
+| `snowflake.cortex_analyst.verified_query.question` | string | Original VQR question |
+| `snowflake.cortex_analyst.verified_query.sql` | string | VQR SQL template |
+| `snowflake.cortex_analyst.verified_query.verified_by` | string | Who verified the query |
+| `snowflake.cortex_analyst.warnings_count` | int | Number of warnings |
+
+**Implementation:**
+The healthcare app formats tool responses with `@cortex_analyst.*` markers, and the span emitter parses these to set span attributes.
+
+**Files Changed:**
+- `attributes.py`: Added 14 Cortex Analyst attribute constants
+- `span.py`: Added `_extract_snowflake_analyst_metadata()` function to parse markers from tool responses
+
 ## Patched Files Summary
 
 | File | Target Location | Description |
 |------|----------------|-------------|
 | `callback_handler_patched.py` | `opentelemetry/instrumentation/langchain/callback_handler.py` | Parent span linking, model extraction, provider propagation |
-| `span_emitter_patched.py` | `opentelemetry/util/genai/emitters/span.py` | Tool attributes, Snowflake metadata extraction |
+| `span_emitter_patched.py` | `opentelemetry/util/genai/emitters/span.py` | Tool attributes, Snowflake Search & Analyst metadata extraction |
 | `types_patched.py` | `opentelemetry/util/genai/types.py` | `parent_span` field for hierarchy |
-| `attributes_patched.py` | `opentelemetry/util/genai/attributes.py` | Snowflake Cortex Search attribute constants |
+| `attributes_patched.py` | `opentelemetry/util/genai/attributes.py` | Snowflake Cortex Search + Analyst attribute constants (18 total) |
 | `instruments_patched.py` | `opentelemetry/util/genai/instruments.py` | Search score histogram with pre-configured buckets |
 | `metrics_patched.py` | `opentelemetry/util/genai/emitters/metrics.py` | Search score metric recording with exemplar linking |
 
@@ -224,6 +271,22 @@ After applying patches, verify with a test query that triggers search tools:
 - `snowflake.cortex_search.result_count`
 - `snowflake.cortex_search.sources`
 
+**Snowflake Cortex Analyst tool spans should also include:**
+- `snowflake.database`
+- `snowflake.schema`
+- `snowflake.warehouse`
+- `snowflake.cortex_analyst.request_id`
+- `snowflake.cortex_analyst.semantic_model.name`
+- `snowflake.cortex_analyst.semantic_model.type`
+- `snowflake.cortex_analyst.sql`
+- `snowflake.cortex_analyst.model_names`
+- `snowflake.cortex_analyst.question_category`
+- `snowflake.cortex_analyst.verified_query.name` (if VQR matched)
+- `snowflake.cortex_analyst.verified_query.question` (if VQR matched)
+- `snowflake.cortex_analyst.verified_query.sql` (if VQR matched)
+- `snowflake.cortex_analyst.verified_query.verified_by` (if VQR matched)
+- `snowflake.cortex_analyst.warnings_count`
+
 ### 2. Histogram Metric (check in OTel collector logs)
 
 ```
@@ -262,6 +325,8 @@ workflow react_healthcare
 
 ## Example OTel Collector Output
 
+### Cortex Search Tool Span
+
 ```
 Span #3
     Trace ID       : 1ee0b6f4f88c813637195748268cfeb3
@@ -272,6 +337,9 @@ Span #3
 Attributes:
      -> gen_ai.tool.name: Str(search_knowledge)
      -> gen_ai.tool.call.id: Str(tooluse_ge8XouBYRLGxPKGrVs23Zw)
+     -> snowflake.database: Str(HEALTHCARE_DB)
+     -> snowflake.schema: Str(KNOWLEDGE_SCHEMA)
+     -> snowflake.warehouse: Str(PAYERS_CC_WH)
      -> gen_ai.tool.type: Str(function)
      -> gen_ai.tool.call.arguments: Str({"query": "previous calls for Justin Tran"})
      -> gen_ai.tool.call.result: Str([Knowledge Search] Found 9 results...)
@@ -279,6 +347,38 @@ Attributes:
      -> snowflake.cortex_search.top_score: Double(0.446)
      -> snowflake.cortex_search.result_count: Int(9)
      -> snowflake.cortex_search.sources: Str(transcripts)
+     -> gen_ai.provider.name: Str(snowflake)
+```
+
+### Cortex Analyst Tool Span
+
+```
+Span #5
+    Trace ID       : 1ee0b6f4f88c813637195748268cfeb3
+    Parent ID      : 0446be4472da32a1
+    ID             : 7a8b9c0d1e2f3g4h
+    Name           : tool query_healthcare_database
+    Kind           : Client
+Attributes:
+     -> gen_ai.tool.name: Str(query_healthcare_database)
+     -> gen_ai.tool.call.id: Str(tooluse_abc123xyz)
+     -> gen_ai.tool.type: Str(function)
+     -> gen_ai.tool.call.arguments: Str({"query": "coverage info for member 578154695"})
+     -> gen_ai.tool.call.result: Str([Database Query Results] Query result: {...})
+     -> snowflake.database: Str(HEALTHCARE_DB)
+     -> snowflake.schema: Str(PUBLIC)
+     -> snowflake.warehouse: Str(PAYERS_CC_WH)
+     -> snowflake.cortex_analyst.request_id: Str(1855de73-2d56-48dc-8707-8a38af05ad6a)
+     -> snowflake.cortex_analyst.semantic_model.name: Str(@HEALTHCARE_DB.STAGING.SEMANTIC_MODELS/healthcare_semantic_model.yaml)
+     -> snowflake.cortex_analyst.semantic_model.type: Str(FILE_ON_STAGE)
+     -> snowflake.cortex_analyst.sql: Str(SELECT DISTINCT member_id, member_name... WHERE member_id = '578154695')
+     -> snowflake.cortex_analyst.model_names: Str(['claude-4-sonnet'])
+     -> snowflake.cortex_analyst.question_category: Str(CLEAR_SQL)
+     -> snowflake.cortex_analyst.verified_query.name: Str(member_details)
+     -> snowflake.cortex_analyst.verified_query.question: Str(Tell me about member 470154690)
+     -> snowflake.cortex_analyst.verified_query.sql: Str(SELECT DISTINCT member_id... WHERE member_id = '470154690')
+     -> snowflake.cortex_analyst.verified_query.verified_by: Str(system)
+     -> snowflake.cortex_analyst.warnings_count: Int(0)
      -> gen_ai.provider.name: Str(snowflake)
 ```
 
