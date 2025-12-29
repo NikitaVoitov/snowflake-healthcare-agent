@@ -25,6 +25,7 @@ if [ -z "$SITE_PACKAGES" ]; then
 fi
 
 LANGCHAIN_SNOWFLAKE_DIR="$SITE_PACKAGES/langchain_snowflake/chat_models"
+LANGCHAIN_SNOWFLAKE_ROOT="$SITE_PACKAGES/langchain_snowflake"
 if [ ! -d "$LANGCHAIN_SNOWFLAKE_DIR" ]; then
     echo "❌ langchain-snowflake not installed"
     exit 1
@@ -52,6 +53,20 @@ if [ -f "$LANGCHAIN_SNOWFLAKE_DIR/tools.py.original" ]; then
     cp "$LANGCHAIN_SNOWFLAKE_DIR/tools.py.original" "$LANGCHAIN_SNOWFLAKE_DIR/tools.py"
 else
     echo "⚠️ No backup found for tools.py"
+fi
+
+if [ -f "$LANGCHAIN_SNOWFLAKE_ROOT/mcp_integration.py.original" ]; then
+    echo "🔄 Restoring original mcp_integration.py..."
+    cp "$LANGCHAIN_SNOWFLAKE_ROOT/mcp_integration.py.original" "$LANGCHAIN_SNOWFLAKE_ROOT/mcp_integration.py"
+else
+    echo "⚠️ No backup found for mcp_integration.py"
+fi
+
+if [ -f "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py.original" ]; then
+    echo "🔄 Restoring original retrievers.py..."
+    cp "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py.original" "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py"
+else
+    echo "⚠️ No backup found for retrievers.py"
 fi
 
 echo ""

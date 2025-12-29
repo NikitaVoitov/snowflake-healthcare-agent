@@ -26,7 +26,8 @@ from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from .._error_handling import SnowflakeErrorHandler
-from .utils import SnowflakeMetadataFactory
+
+# SnowflakeMetadataFactory import removed - using inline metadata dicts
 
 logger = logging.getLogger(__name__)
 
@@ -390,9 +391,13 @@ The goal is to provide the most helpful, accurate, and relevant information to t
                     "usage": {},
                 }
 
-        # Process the response data
+        # PATCH: Check if this is a non-streaming response (has "message" not "delta")
+        # Non-streaming responses use a different format that _parse_direct_response handles
         choices = response_data.get("choices", [])
+        if choices and "message" in choices[0] and "delta" not in choices[0]:
+            return self._parse_direct_response(response_data)
 
+        # Process the response data (streaming format with delta)
         for choice in choices:
             delta = choice.get("delta", {})
             message = choice.get("message", {})
@@ -485,15 +490,24 @@ The goal is to provide the most helpful, accurate, and relevant information to t
             additional_kwargs={"usage": usage_data},
         )
 
-        metadata = SnowflakeMetadataFactory.create_metadata(
-            model=response_data.get("model", self.model),
-            usage=usage_data,
-        )
+        # Create metadata dict inline (avoiding dependency on create_metadata)
+        metadata = {
+            "model": response_data.get("model", self.model),
+            "usage": usage_data,
+        }
 
         return ChatResult(
             generations=[ChatGeneration(message=ai_message)],
             llm_output=metadata,
         )
+
+    async def _parse_rest_api_response_async(self, response_or_data, original_messages: list[BaseMessage]) -> ChatResult:
+        """Async wrapper for parsing REST API response.
+
+        The actual parsing is CPU-bound and doesn't require async I/O,
+        so this simply delegates to the sync version.
+        """
+        return self._parse_rest_api_response(response_or_data, original_messages)
 
     def _parse_direct_response(self, data: dict[str, Any]) -> ChatResult:
         """Parse a direct JSON response (non-streaming format) with content_list support."""
@@ -534,10 +548,11 @@ The goal is to provide the most helpful, accurate, and relevant information to t
             additional_kwargs={"usage": usage_data},
         )
 
-        metadata = SnowflakeMetadataFactory.create_metadata(
-            model=data.get("model", getattr(self, "model", "unknown")),
-            usage=usage_data,
-        )
+        # Create metadata dict inline (avoiding dependency on create_metadata)
+        metadata = {
+            "model": data.get("model", getattr(self, "model", "unknown")),
+            "usage": usage_data,
+        }
 
         return ChatResult(
             generations=[ChatGeneration(message=ai_message)],

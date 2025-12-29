@@ -6,6 +6,9 @@
 # 2. Fake streaming fix (always use REST API for native streaming)
 # 3. disable_streaming parameter for explicit control
 # 4. Message format fix for multi-turn conversations with tools (400 Bad Request fix)
+# 5. Non-streaming response parsing (tool_calls not extracted from non-streaming responses)
+# 6. Tool import fix for langchain 1.2.0+ compatibility (langchain_core.tools.Tool)
+# 7. Retrievers: Add _snowflake_request_id to Document metadata for OTel tracing
 #
 # Usage: ./patches/apply_patches.sh
 
@@ -30,6 +33,7 @@ if [ -z "$SITE_PACKAGES" ]; then
 fi
 
 LANGCHAIN_SNOWFLAKE_DIR="$SITE_PACKAGES/langchain_snowflake/chat_models"
+LANGCHAIN_SNOWFLAKE_ROOT="$SITE_PACKAGES/langchain_snowflake"
 if [ ! -d "$LANGCHAIN_SNOWFLAKE_DIR" ]; then
     echo "❌ langchain-snowflake not installed. Install with:"
     echo "   uv pip install langchain-snowflake"
@@ -54,6 +58,16 @@ if [ ! -f "$LANGCHAIN_SNOWFLAKE_DIR/tools.py.original" ]; then
     cp "$LANGCHAIN_SNOWFLAKE_DIR/tools.py" "$LANGCHAIN_SNOWFLAKE_DIR/tools.py.original"
 fi
 
+if [ ! -f "$LANGCHAIN_SNOWFLAKE_ROOT/mcp_integration.py.original" ]; then
+    echo "💾 Backing up original mcp_integration.py..."
+    cp "$LANGCHAIN_SNOWFLAKE_ROOT/mcp_integration.py" "$LANGCHAIN_SNOWFLAKE_ROOT/mcp_integration.py.original"
+fi
+
+if [ ! -f "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py.original" ]; then
+    echo "💾 Backing up original retrievers.py..."
+    cp "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py" "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py.original"
+fi
+
 # Apply patches
 echo "🔧 Applying streaming.py patch (ToolCallChunk + fake streaming fix)..."
 cp "$SCRIPT_DIR/langchain_snowflake_streaming_patched.py" "$LANGCHAIN_SNOWFLAKE_DIR/streaming.py"
@@ -61,8 +75,14 @@ cp "$SCRIPT_DIR/langchain_snowflake_streaming_patched.py" "$LANGCHAIN_SNOWFLAKE_
 echo "🔧 Applying base.py patch (disable_streaming parameter)..."
 cp "$SCRIPT_DIR/langchain_snowflake_base_patched.py" "$LANGCHAIN_SNOWFLAKE_DIR/base.py"
 
-echo "🔧 Applying tools.py patch (message format fix for 400 Bad Request)..."
+echo "🔧 Applying tools.py patch (message format fix + non-streaming response parsing)..."
 cp "$SCRIPT_DIR/langchain_snowflake_tools_patched.py" "$LANGCHAIN_SNOWFLAKE_DIR/tools.py"
+
+echo "🔧 Applying mcp_integration.py patch (langchain 1.2.0+ Tool import fix)..."
+cp "$SCRIPT_DIR/langchain_snowflake_mcp_integration_patched.py" "$LANGCHAIN_SNOWFLAKE_ROOT/mcp_integration.py"
+
+echo "🔧 Applying retrievers.py patch (_snowflake_request_id propagation)..."
+cp "$SCRIPT_DIR/langchain_snowflake_retrievers_patched.py" "$LANGCHAIN_SNOWFLAKE_ROOT/retrievers.py"
 
 echo ""
 echo "✅ Patches applied successfully!"
@@ -74,6 +94,12 @@ echo "  3. base.py: Added disable_streaming parameter"
 echo "  4. tools.py: Fixed assistant message format per Snowflake REST API spec"
 echo "              (top-level 'content' + 'content_list' for tool_use only)"
 echo "              This fixes 400 Bad Request on multi-turn conversations!"
+echo "  5. tools.py: Fixed non-streaming response parsing (delegates to _parse_direct_response)"
+echo "              This fixes tool_calls not being extracted when stream=False!"
+echo "  6. mcp_integration.py: Fixed Tool import for langchain 1.2.0+ compatibility"
+echo "              (from langchain_core.tools import Tool)"
+echo "  7. retrievers.py: Added _snowflake_request_id to Document metadata"
+echo "              Enables OTel tracing of Cortex Search API calls"
 echo ""
 echo "To revert patches:"
 echo "  ./patches/revert_patches.sh"
