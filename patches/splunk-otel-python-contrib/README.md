@@ -176,6 +176,36 @@ The healthcare app formats tool responses with `@cortex_analyst.*` markers, and 
 - `attributes.py`: Added 14 Cortex Analyst attribute constants
 - `span.py`: Added `_extract_snowflake_analyst_metadata()` function to parse markers from tool responses
 
+### 9. Cortex Inference LLM Completion Attributes (Enhancement)
+
+**Problem:** Snowflake Cortex Inference API (`/api/v2/cortex/inference:complete`) returns metadata that wasn't captured for LLM observability.
+
+**Cortex Inference API returns:**
+- `id` - Unique request identifier for API tracing/correlation
+- `choices[0].finish_reason` - How the completion finished (`stop`, `length`, `tool_calls`, `tool_use`)
+- `usage.guard_tokens` - Tokens consumed by Cortex Guard (content safety) if enabled
+
+**Enhancement:**
+Uses standard GenAI semantic convention attributes where available (for portability across providers), plus Snowflake-specific attributes for features unique to Cortex:
+
+| Attribute | Type | Standard? | Description |
+|-----------|------|-----------|-------------|
+| `gen_ai.response.id` | string | ✅ OTel semconv | Request ID from API (per [gen-ai-spans.md](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-spans.md)) |
+| `gen_ai.response.finish_reasons` | string[] | ✅ OTel semconv | Array of stop reasons (per semconv) |
+| `snowflake.inference.guard_tokens` | int | ❌ Snowflake-specific | Guard tokens consumed (Cortex Guard) |
+
+**Implementation:**
+1. Modified `langchain-snowflake` to extract `id`, `finish_reason`, and `guard_tokens` from API response and store in `response_metadata`
+2. The callback handler extracts these from `response_metadata`:
+   - `snowflake_request_id` → `inv.response_id` (maps to `gen_ai.response.id`)
+   - `finish_reason` → `inv.attributes["gen_ai.response.finish_reasons"]` (array per semconv)
+   - `snowflake_guard_tokens` → `inv.attributes["snowflake.inference.guard_tokens"]`
+
+**Files Changed:**
+- `callback_handler.py`: Extract metadata from `response_metadata` in `on_llm_end()`, using standard semconv fields
+- `span.py`: Added `gen_ai.response.finish_reasons` and `snowflake.inference.guard_tokens` to `_SPAN_ALLOWED_SUPPLEMENTAL_KEYS`
+- `attributes.py`: Added only `SNOWFLAKE_INFERENCE_GUARD_TOKENS` (others are standard semconv)
+
 ## Patched Files Summary
 
 | File | Target Location | Description |
@@ -253,9 +283,12 @@ After applying patches, verify with a test query that triggers search tools:
 ### 1. Span Attributes (check in OTel collector logs)
 
 **LLM spans should include:**
-- `gen_ai.request.model` - Actual model name (e.g., `claude-3-5-sonnet`)
+- `gen_ai.request.model` - Actual model name (e.g., `claude-4-sonnet`)
 - `gen_ai.response.model` - Response model name
+- `gen_ai.response.id` - Unique request ID from Cortex Inference API
+- `gen_ai.response.finish_reasons` - Array of stop reasons (e.g., `["stop"]`, `["tool_calls"]`)
 - `gen_ai.provider.name` - Provider (e.g., `snowflake`)
+- `snowflake.inference.guard_tokens` - Guard tokens consumed (if Cortex Guard enabled)
 
 **Tool spans should include:**
 - `gen_ai.tool.name` (e.g., `search_knowledge`)

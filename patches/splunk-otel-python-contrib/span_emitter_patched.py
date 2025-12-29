@@ -85,6 +85,13 @@ from .utils import (
 _SPAN_ALLOWED_SUPPLEMENTAL_KEYS: tuple[str, ...] = (
     "gen_ai.framework",
     "gen_ai.request.id",
+    # Standard GenAI semconv attributes (from response_metadata)
+    "gen_ai.response.finish_reasons",
+    # Snowflake-specific attributes (not in semconv)
+    "snowflake.inference.guard_tokens",  # Cortex Guard token usage
+    "snowflake.database",
+    "snowflake.schema",
+    "snowflake.warehouse",
 )
 _SPAN_BLOCKED_SUPPLEMENTAL_KEYS: set[str] = {"request_top_p", "ls_temperature"}
 

@@ -598,8 +598,12 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         inv.input_tokens = usage.get("prompt_tokens")
         inv.output_tokens = usage.get("completion_tokens")
 
-        # Extract response model from response metadata if available
-        if not inv.response_model_name and generations:
+        # Extract response model and metadata from response_metadata
+        # Uses standard GenAI semantic conventions where available:
+        # - gen_ai.response.id (standard semconv)
+        # - gen_ai.response.finish_reasons (standard semconv, array)
+        # - snowflake.inference.guard_tokens (Snowflake-specific)
+        if generations:
             for generation_list in generations:
                 for generation in generation_list:
                     if (
@@ -607,12 +611,32 @@ class LangchainCallbackHandler(BaseCallbackHandler):
                         and hasattr(generation.message, "response_metadata")
                         and generation.message.response_metadata
                     ):
-                        model_name = generation.message.response_metadata.get(
-                            "model_name"
-                        )
-                        if model_name:
-                            inv.response_model_name = _safe_str(model_name)
-                            break
+                        response_meta = generation.message.response_metadata
+                        
+                        # Extract model name
+                        if not inv.response_model_name:
+                            model_name = response_meta.get("model_name")
+                            if model_name:
+                                inv.response_model_name = _safe_str(model_name)
+                        
+                        # Extract response ID (standard semconv: gen_ai.response.id)
+                        # langchain-snowflake stores this as "snowflake_request_id"
+                        if response_meta.get("snowflake_request_id") and not inv.response_id:
+                            inv.response_id = _safe_str(response_meta["snowflake_request_id"])
+                        
+                        # Extract finish reason (standard semconv: gen_ai.response.finish_reasons)
+                        # Stored as array per semconv spec
+                        if response_meta.get("finish_reason"):
+                            inv.attributes["gen_ai.response.finish_reasons"] = [
+                                _safe_str(response_meta["finish_reason"])
+                            ]
+                        
+                        # Snowflake-specific: Guard tokens consumed by Cortex Guard
+                        if response_meta.get("snowflake_guard_tokens") is not None:
+                            inv.attributes["snowflake.inference.guard_tokens"] = int(
+                                response_meta["snowflake_guard_tokens"]
+                            )
+                        break
                 if inv.response_model_name:
                     break
 

@@ -124,3 +124,17 @@ SNOWFLAKE_CORTEX_ANALYST_VERIFIED_QUERY_VERIFIED_BY = "snowflake.cortex_analyst.
 
 # Number of warnings returned by Cortex Analyst
 SNOWFLAKE_CORTEX_ANALYST_WARNINGS_COUNT = "snowflake.cortex_analyst.warnings_count"
+
+# ============================================================================
+# Snowflake Cortex Inference Provider-Specific Attributes
+# ============================================================================
+# Most LLM completion metadata uses standard GenAI semconv attributes:
+# - gen_ai.response.id (request ID from API)
+# - gen_ai.response.finish_reasons (why completion stopped)
+# - gen_ai.response.model (model that generated response)
+#
+# Only Snowflake-specific features that have no semconv equivalent are here:
+
+# Guard tokens consumed by Cortex Guard (content safety) if enabled
+# Useful for tracking cost and usage of Snowflake's safety features
+SNOWFLAKE_INFERENCE_GUARD_TOKENS = "snowflake.inference.guard_tokens"
