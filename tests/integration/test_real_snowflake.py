@@ -300,13 +300,23 @@ class TestRealCortexTools:
         from src.services.cortex_tools import AsyncCortexSearchTool
 
         tool = AsyncCortexSearchTool(snowpark_session)
-        results = await tool.execute("deductible policy", limit=3)
+        result = await tool.execute("deductible policy", limit=3)
 
-        # Should return results from Cortex Search
+        # Result is now a dict with 'results' and 'cortex_search_metadata'
+        assert isinstance(result, dict)
+        assert "results" in result
+        assert "cortex_search_metadata" in result
+
+        results = result["results"]
         assert isinstance(results, list)
         if results:
             assert "text" in results[0]
             assert "source" in results[0]
+
+        # Verify metadata structure
+        metadata = result["cortex_search_metadata"]
+        assert "snowflake" in metadata
+        assert "database" in metadata["snowflake"]
 
 
 class TestRealCheckpointer:
