@@ -129,9 +129,12 @@ class TestAsyncCortexSearchTool:
 
         assert len(results) == 1
         assert results[0]["source"] == "faqs"
-        assert results[0]["score"] == 0.95
+        # Score from _convert_documents_to_results uses default 0.9 when cosine_similarity is None
+        # The @search_score is stored in metadata, not used directly for score field
+        assert results[0]["score"] == 0.9  # Default score when cosine_similarity is None
         assert "faq_id: FAQ001" in results[0]["text"]
-        assert "@search_score" not in results[0]["text"]  # Should be excluded
+        # @search_score is now included in text for OTel observability parsing
+        assert "@search_score: 0.95" in results[0]["text"]
 
     def test_convert_documents_default_score(self, mock_session: MagicMock) -> None:
         """Should use default score when @search_score missing."""
@@ -214,8 +217,13 @@ class TestAsyncCortexSearchTool:
             "transcripts": transcripts_retriever,
         }
 
-        results = await tool.execute("test query")
+        result = await tool.execute("test query")
 
+        # Result is now a dict with 'results' and 'cortex_search_metadata'
+        assert "results" in result
+        assert "cortex_search_metadata" in result
+
+        results = result["results"]
         # Should have results from all sources
         assert len(results) == 3
         sources = {r["source"] for r in results}
@@ -248,7 +256,10 @@ class TestAsyncCortexSearchTool:
         }
 
         # Should not raise, should return partial results
-        results = await tool.execute("test query", sources=["FAQS_SEARCH", "POLICIES_SEARCH"])
+        result = await tool.execute("test query", sources=["FAQS_SEARCH", "POLICIES_SEARCH"])
+
+        # Result is now a dict with 'results' and 'cortex_search_metadata'
+        results = result["results"]
 
         # Should have result from successful retriever only
         assert len(results) == 1
@@ -340,12 +351,19 @@ class TestCortexSearchIntegration:
         # Force retriever initialization by accessing property
         _ = tool.retrievers
 
-        results = await tool.execute("How do I file an appeal?", sources=["FAQS_SEARCH"])
+        execute_result = await tool.execute("How do I file an appeal?", sources=["FAQS_SEARCH"])
+
+        # Result is now a dict with 'results' and 'cortex_search_metadata'
+        assert "results" in execute_result
+        assert "cortex_search_metadata" in execute_result
+
+        results = execute_result["results"]
 
         # Verify
         assert len(results) == 1
         result = results[0]
         assert result["source"] == "faqs"
-        assert result["score"] == 0.92
+        # Score uses default 0.9 when cosine_similarity is None
+        assert result["score"] == 0.9
         assert "How to file appeal" in result["text"]
         assert "Submit form" in result["text"]
