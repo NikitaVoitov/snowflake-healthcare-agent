@@ -253,6 +253,83 @@ cost_usd = settings.estimate_cortex_analyst_cost_usd(message_count=100)
 - `snowflake.cortex.credits` - Credits consumed (counter)
 - `snowflake.cortex.cost` - Cost in USD (counter)
 
+### 11. LangGraph Workflow Metadata for Agent Flow Visualization (Enhancement)
+
+**Problem:** LangGraph workflows instrumented via `LangChainInstrumentor` auto-instrumentation were missing the "Agent Flow" visualization in Splunk O11y trace views. This visual graph feature requires specific workflow attributes.
+
+**Root Cause:** LangGraph dev server **replaces custom metadata** with its own internal metadata (like `langgraph_version`, `graph_id`, etc.), so applications cannot pass `workflow_type` via config metadata. However, **tags ARE merged/preserved**.
+
+**Required Attributes for Agent Flow Visualization:**
+
+| Attribute | Value | Purpose |
+|-----------|-------|---------|
+| `gen_ai.workflow.type` | `"graph"` | **Required** - Enables Agent Flow visualization |
+| `gen_ai.workflow.description` | `"..."` | Displayed in UI (optional) |
+| `gen_ai.framework` | `"langgraph"` | Identifies orchestration library |
+
+**Solution:**
+Patched `callback_handler.py` to **auto-detect LangGraph workflows** from:
+1. **LangGraph internal metadata keys**: `langgraph_version`, `graph_id` (set by LangGraph dev server)
+2. **Custom tags**: `langgraph` tag and `description:*` tag (preserved by LangGraph dev server)
+
+```python
+# Auto-detection logic in callback_handler.py
+if metadata.get("langgraph_version") or metadata.get("graph_id"):
+    wf.workflow_type = "graph"
+    wf.framework = "langgraph"
+elif tags and "langgraph" in tags:
+    wf.framework = "langgraph"
+    wf.workflow_type = "graph"
+
+# Description via tag (since metadata is replaced)
+for tag in tags:
+    if tag.startswith("description:"):
+        wf.description = tag[len("description:"):]
+
+# Fallback: generate description from graph_id
+if not wf.description and metadata.get("graph_id"):
+    wf.description = f"LangGraph workflow: {graph_id}"
+```
+
+**⚠️ IMPORTANT:** 
+- Do NOT use `.with_config()` on compiled graphs for LangGraph dev server - it breaks graph execution!
+- Description must NOT contain the word "agent" - it triggers `_is_agent_root()` detection, creating an `AgentInvocation` instead of `Workflow`!
+
+**Auto-Detection (recommended for LangGraph dev server):**
+
+The callback handler automatically detects LangGraph workflows from metadata provided by LangGraph itself:
+- Detects `langgraph_version` or `graph_id` in metadata → sets `workflow_type="graph"`, `framework="langgraph"`
+- Auto-generates description as `"LangGraph workflow: {graph_id}"`
+
+No application changes needed - just compile the graph normally:
+```python
+# LangGraph dev server - auto-detection handles everything
+react_healthcare_graph = build_react_graph().compile()
+```
+
+**Direct Invocation (for custom description when NOT using LangGraph dev server):**
+
+```python
+# For direct graph.ainvoke() calls: metadata is passed through
+config = {
+    "configurable": {"thread_id": thread_id},
+    "metadata": {
+        "workflow_type": "graph",
+        "framework": "langgraph",
+        "description": "Healthcare ReAct workflow with Cortex tools",  # No "agent" word!
+    },
+}
+result = await self.graph.ainvoke(initial_state, config=config)
+```
+
+**Files Changed:**
+- `callback_handler.py`: Extended workflow creation with auto-detection:
+  - Detects LangGraph from `langgraph_version` / `graph_id` metadata
+  - Extracts description from `description:*` tag
+  - Falls back to `"LangGraph workflow: {graph_id}"` if no description
+  - `workflow_type` → `wf.workflow_type` (auto: `"graph"`)
+  - `framework` → `wf.framework` (auto: `"langgraph"`)
+
 ## Patched Files Summary
 
 | File | Target Location | Description |

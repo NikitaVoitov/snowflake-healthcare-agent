@@ -137,7 +137,16 @@ class AgentService:
         # Use provided thread_id for conversation continuation, or create new one
         is_continuation = request.thread_id is not None
         thread_id = request.thread_id or self._build_thread_id(request.tenant_id, request.user_id)
-        config = {"configurable": {"thread_id": thread_id}}
+        # Configure with thread_id and workflow metadata for observability
+        # The metadata enables Agent Flow visualization in Splunk O11y trace views
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "metadata": {
+                "workflow_type": "graph",  # Enables Agent Flow visualization
+                "framework": "langgraph",
+                "description": "Healthcare ReAct workflow with Cortex Analyst and Search tools",
+            },
+        }
 
         # Build initial state for new turn
         initial_state = self._build_initial_state(request, thread_id)

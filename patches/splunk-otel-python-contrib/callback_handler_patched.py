@@ -7,22 +7,24 @@ Complex logic removed (agent heuristics, child counting, prompt capture, events)
 from __future__ import annotations
 
 import json
-from typing import Any, Optional, List
+from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import HumanMessage, BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.outputs import LLMResult
 from opentelemetry.util.genai.handler import TelemetryHandler
 from opentelemetry.util.genai.types import (
-    Workflow,
-    Step,
     AgentInvocation,
-    LLMInvocation,
     InputMessage,
+    LLMInvocation,
     OutputMessage,
+    Step,
     Text,
     ToolCall,
+    Workflow,
+)
+from opentelemetry.util.genai.types import (
     Error as GenAIError,
 )
 
@@ -34,7 +36,7 @@ def _safe_str(value: Any) -> str:
         return "<unrepr>"
 
 
-def _serialize(obj: Any) -> Optional[str]:
+def _serialize(obj: Any) -> str | None:
     if obj is None:
         return None
     try:
@@ -46,9 +48,7 @@ def _serialize(obj: Any) -> Optional[str]:
             return None
 
 
-def _resolve_agent_name(
-    tags: Optional[list[str]], metadata: Optional[dict[str, Any]]
-) -> Optional[str]:
+def _resolve_agent_name(tags: list[str] | None, metadata: dict[str, Any] | None) -> str | None:
     if metadata:
         for key in ("agent_name", "gen_ai.agent.name", "agent"):
             value = metadata.get(key)
@@ -68,9 +68,7 @@ def _resolve_agent_name(
     return None
 
 
-def _is_agent_root(
-    tags: Optional[list[str]], metadata: Optional[dict[str, Any]]
-) -> bool:
+def _is_agent_root(tags: list[str] | None, metadata: dict[str, Any] | None) -> bool:
     if _resolve_agent_name(tags, metadata):
         return True
     if tags:
@@ -86,8 +84,8 @@ def _is_agent_root(
 
 
 def _extract_tool_details(
-    metadata: Optional[dict[str, Any]],
-) -> Optional[dict[str, Any]]:
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     if not metadata:
         return None
 
@@ -160,21 +158,21 @@ def _extract_tool_details(
 class LangchainCallbackHandler(BaseCallbackHandler):
     def __init__(
         self,
-        telemetry_handler: Optional[TelemetryHandler] = None,
+        telemetry_handler: TelemetryHandler | None = None,
     ) -> None:
         super().__init__()
         self._handler = telemetry_handler
 
-    def _resolve_parent_span(self, parent_run_id: Optional[UUID]) -> Optional[Any]:
+    def _resolve_parent_span(self, parent_run_id: UUID | None) -> Any | None:
         """Resolve parent_run_id to an actual OpenTelemetry Span from the handler's registry.
-        
+
         This enables proper parent-child span linking in traces.
         """
         if parent_run_id is None:
             return None
         return self._handler.get_span_by_run_id(parent_run_id)
 
-    def _find_nearest_agent(self, run_id: Optional[UUID]) -> Optional[AgentInvocation]:
+    def _find_nearest_agent(self, run_id: UUID | None) -> AgentInvocation | None:
         current = run_id
         visited = set()
         while current is not None and current not in visited:
@@ -187,15 +185,15 @@ class LangchainCallbackHandler(BaseCallbackHandler):
             current = getattr(entity, "parent_run_id", None)
         return None
 
-    def _find_nearest_provider_context(self, run_id: Optional[UUID]) -> Optional[str]:
+    def _find_nearest_provider_context(self, run_id: UUID | None) -> str | None:
         """Find provider from nearest parent that has one (Agent, Workflow, or Step).
-        
+
         This enables provider inheritance for tools even when no AgentInvocation exists
-        in the hierarchy (e.g., single-workflow patterns like healthcare-agent).
-        
+        in the hierarchy (e.g., single-workflow patterns).
+
         Args:
             run_id: The run_id to start searching from.
-            
+
         Returns:
             The provider string if found, None otherwise.
         """
@@ -213,17 +211,17 @@ class LangchainCallbackHandler(BaseCallbackHandler):
             current = getattr(entity, "parent_run_id", None)
         return None
 
-    def _propagate_provider_to_root(self, run_id: Optional[UUID], provider: str) -> None:
+    def _propagate_provider_to_root(self, run_id: UUID | None, provider: str) -> None:
         """Propagate provider to ALL ancestors up to the root.
-        
+
         This enables provider inheritance for sibling branches (like LangGraph's
         separate model_node and tools_node) by setting provider on the common
         root workflow. Without this, tools in a different branch than the LLM
         won't be able to find the provider.
-        
+
         Flow: LLM (provider detected) → model_node → workflow (set here)
               tool → tools_node → workflow (find here)
-        
+
         Args:
             run_id: The starting run_id to walk up from.
             provider: The provider string to propagate.
@@ -247,11 +245,11 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         *,
         name: str,
         run_id: UUID,
-        parent_run_id: Optional[UUID],
+        parent_run_id: UUID | None,
         attrs: dict[str, Any],
         inputs: dict[str, Any],
-        metadata: Optional[dict[str, Any]],
-        agent_name: Optional[str],
+        metadata: dict[str, Any] | None,
+        agent_name: str | None,
     ) -> AgentInvocation:
         agent = AgentInvocation(
             name=name,
@@ -276,13 +274,13 @@ class LangchainCallbackHandler(BaseCallbackHandler):
 
     def on_chain_start(
         self,
-        serialized: Optional[dict[str, Any]],
+        serialized: dict[str, Any] | None,
         inputs: dict[str, Any],
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         **extra: Any,
     ) -> None:
         payload = serialized or {}
@@ -308,21 +306,53 @@ class LangchainCallbackHandler(BaseCallbackHandler):
             else:
                 wf = Workflow(name=name, run_id=run_id, attributes=attrs)
                 wf.initial_input = _serialize(inputs)
+                # Extract workflow metadata for Agent Flow visualization in Splunk O11y
+                # These attributes enable the visual workflow graph in trace views
+                # Note: LangGraph dev server replaces custom metadata with its own,
+                # but merges tags. We detect LangGraph from its metadata keys.
+                if metadata:
+                    # workflow_type enables Agent Flow visualization (e.g., "graph", "sequential")
+                    if metadata.get("workflow_type"):
+                        wf.workflow_type = _safe_str(metadata["workflow_type"])
+                    elif metadata.get("langgraph_version") or metadata.get("graph_id"):
+                        # LangGraph detected from its internal metadata - set type to "graph"
+                        wf.workflow_type = "graph"
+                    # ls_description is LangSmith convention, also check description
+                    desc = metadata.get("ls_description") or metadata.get("description")
+                    if desc:
+                        wf.description = _safe_str(desc)
+                    # framework helps identify the orchestration library
+                    if metadata.get("framework"):
+                        wf.framework = _safe_str(metadata["framework"])
+                    elif metadata.get("langgraph_version"):
+                        # LangGraph detected - set framework
+                        wf.framework = "langgraph"
+                # Fallback: detect framework and description from tags
+                # Tags are preserved by LangGraph dev server (unlike metadata)
+                if tags:
+                    if not wf.framework and "langgraph" in tags:
+                        wf.framework = "langgraph"
+                        if not wf.workflow_type:
+                            wf.workflow_type = "graph"
+                    # Support description via tag: "description:My workflow description"
+                    if not wf.description:
+                        for tag in tags:
+                            if isinstance(tag, str) and tag.startswith("description:"):
+                                wf.description = tag[len("description:"):]
+                                break
+                # Generate description from graph_id if still not set
+                if not wf.description and metadata and metadata.get("graph_id"):
+                    graph_id = _safe_str(metadata["graph_id"])
+                    wf.description = f"LangGraph workflow: {graph_id}"
                 # No parent for root workflow (parent_run_id is None here)
                 self._handler.start_workflow(wf)
             return
         else:
             context_agent = self._find_nearest_agent(parent_run_id)
-            context_agent_name = (
-                _safe_str(context_agent.agent_name or context_agent.name)
-                if context_agent
-                else None
-            )
+            context_agent_name = _safe_str(context_agent.agent_name or context_agent.name) if context_agent else None
             if agent_name_hint:
                 hint_normalized = agent_name_hint.lower()
-                context_normalized = (
-                    context_agent_name.lower() if context_agent_name else None
-                )
+                context_normalized = context_agent_name.lower() if context_agent_name else None
                 if context_normalized != hint_normalized:
                     self._start_agent_invocation(
                         name=name,
@@ -340,9 +370,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
                 if isinstance(existing, ToolCall):
                     tool = existing
                     if context_agent is not None:
-                        agent_name_value = (
-                            context_agent.agent_name or context_agent.name
-                        )
+                        agent_name_value = context_agent.agent_name or context_agent.name
                         if not getattr(tool, "agent_name", None):
                             tool.agent_name = _safe_str(agent_name_value)
                         if not getattr(tool, "agent_id", None):
@@ -350,13 +378,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
                 else:
                     # Filter out tool-specific metadata from attributes
                     # since they're stored in dedicated fields
-                    tool_attrs = {
-                        k: v
-                        for k, v in attrs.items()
-                        if not (
-                            isinstance(k, str) and k.lower().startswith("gen_ai.tool.")
-                        )
-                    }
+                    tool_attrs = {k: v for k, v in attrs.items() if not (isinstance(k, str) and k.lower().startswith("gen_ai.tool."))}
                     arguments = tool_info.get("arguments")
                     if arguments is None:
                         arguments = inputs
@@ -403,7 +425,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         outputs: dict[str, Any],
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
+        parent_run_id: UUID | None = None,
         **_kwargs: Any,
     ) -> None:
         entity = self._handler.get_entity(run_id)
@@ -426,13 +448,13 @@ class LangchainCallbackHandler(BaseCallbackHandler):
 
     def on_chat_model_start(
         self,
-        serialized: Optional[dict[str, Any]],
-        messages: List[List[BaseMessage]],
+        serialized: dict[str, Any] | None,
+        messages: list[list[BaseMessage]],
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         **extra: Any,
     ) -> None:
         payload = serialized or {}
@@ -450,9 +472,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         for batch in messages:
             for m in batch:
                 content = getattr(m, "content", "")
-                input_messages.append(
-                    InputMessage(role="user", parts=[Text(content=_safe_str(content))])
-                )
+                input_messages.append(InputMessage(role="user", parts=[Text(content=_safe_str(content))]))
 
         # Build attributes from metadata and invocation_params
         attrs: dict[str, Any] = {}
@@ -489,11 +509,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
                     attrs["request_max_tokens"] = mk["max_tokens"]
 
         # Handle max_tokens from metadata.ls_max_tokens
-        if (
-            metadata
-            and "ls_max_tokens" in metadata
-            and "request_max_tokens" not in attrs
-        ):
+        if metadata and "ls_max_tokens" in metadata and "request_max_tokens" not in attrs:
             attrs["request_max_tokens"] = metadata["ls_max_tokens"]
 
         # Add callback info from serialized
@@ -533,13 +549,13 @@ class LangchainCallbackHandler(BaseCallbackHandler):
 
     def on_llm_start(
         self,
-        serialized: Optional[dict[str, Any]],
-        prompts: List[str],
+        serialized: dict[str, Any] | None,
+        prompts: list[str],
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         **extra: Any,
     ) -> None:
         message_batches = [[HumanMessage(content=p)] for p in prompts]
@@ -561,7 +577,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         response: LLMResult,
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
+        parent_run_id: UUID | None = None,
         **_kwargs: Any,
     ) -> None:
         inv = self._handler.get_entity(run_id)
@@ -572,11 +588,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         if generations and generations[0] and generations[0][0].message:
             content = getattr(generations[0][0].message, "content", None)
         if content is not None:
-            finish_reason = (
-                generations[0][0].generation_info.get("finish_reason")
-                if generations[0][0].generation_info
-                else None
-            )
+            finish_reason = generations[0][0].generation_info.get("finish_reason") if generations[0][0].generation_info else None
             if finish_reason == "tool_calls":
                 inv.output_messages = [
                     OutputMessage(
@@ -606,36 +618,28 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         if generations:
             for generation_list in generations:
                 for generation in generation_list:
-                    if (
-                        hasattr(generation, "message")
-                        and hasattr(generation.message, "response_metadata")
-                        and generation.message.response_metadata
-                    ):
+                    if hasattr(generation, "message") and hasattr(generation.message, "response_metadata") and generation.message.response_metadata:
                         response_meta = generation.message.response_metadata
-                        
+
                         # Extract model name
                         if not inv.response_model_name:
                             model_name = response_meta.get("model_name")
                             if model_name:
                                 inv.response_model_name = _safe_str(model_name)
-                        
+
                         # Extract response ID (standard semconv: gen_ai.response.id)
                         # langchain-snowflake stores this as "snowflake_request_id"
                         if response_meta.get("snowflake_request_id") and not inv.response_id:
                             inv.response_id = _safe_str(response_meta["snowflake_request_id"])
-                        
+
                         # Extract finish reason (standard semconv: gen_ai.response.finish_reasons)
                         # Stored as array per semconv spec
                         if response_meta.get("finish_reason"):
-                            inv.attributes["gen_ai.response.finish_reasons"] = [
-                                _safe_str(response_meta["finish_reason"])
-                            ]
-                        
+                            inv.attributes["gen_ai.response.finish_reasons"] = [_safe_str(response_meta["finish_reason"])]
+
                         # Snowflake-specific: Guard tokens consumed by Cortex Guard
                         if response_meta.get("snowflake_guard_tokens") is not None:
-                            inv.attributes["snowflake.inference.guard_tokens"] = int(
-                                response_meta["snowflake_guard_tokens"]
-                            )
+                            inv.attributes["snowflake.inference.guard_tokens"] = int(response_meta["snowflake_guard_tokens"])
                         break
                 if inv.response_model_name:
                     break
@@ -644,14 +648,14 @@ class LangchainCallbackHandler(BaseCallbackHandler):
 
     def on_tool_start(
         self,
-        serialized: Optional[dict[str, Any]],
+        serialized: dict[str, Any] | None,
         input_str: str,
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
-        tags: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
-        inputs: Optional[dict[str, Any]] = None,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        inputs: dict[str, Any] | None = None,
         **extra: Any,
     ) -> None:
         payload = serialized or {}
@@ -662,17 +666,9 @@ class LangchainCallbackHandler(BaseCallbackHandler):
             attrs.update(metadata)
         if tags:
             attrs["tags"] = [str(t) for t in tags]
-        context_agent = (
-            self._find_nearest_agent(parent_run_id)
-            if parent_run_id is not None
-            else None
-        )
-        context_agent_name = (
-            _safe_str(context_agent.agent_name or context_agent.name)
-            if context_agent
-            else None
-        )
-        
+        context_agent = self._find_nearest_agent(parent_run_id) if parent_run_id is not None else None
+        context_agent_name = _safe_str(context_agent.agent_name or context_agent.name) if context_agent else None
+
         # Extract tool_call_id from multiple possible locations:
         # 1. extra.tool_call_id - LangGraph ToolNode passes it here
         # 2. metadata.tool_call_id - some frameworks pass it in metadata
@@ -685,7 +681,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         )
         if tool_call_id is not None:
             tool_call_id = _safe_str(tool_call_id)
-        
+
         # Legacy: serialized.id is the tool's identifier (e.g., ["langchain", "tools", "search"])
         # This is NOT the tool_call_id from the LLM response
         id_source = payload.get("id") or extra.get("id")
@@ -694,7 +690,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
             # (i.e., a string, not a list of module path components)
             if isinstance(id_source, str) and not id_source.startswith("["):
                 tool_call_id = _safe_str(id_source)
-        
+
         arguments: Any = inputs if inputs is not None else input_str
         existing = self._handler.get_entity(run_id)
         if isinstance(existing, ToolCall):
@@ -703,10 +699,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
             if attrs:
                 existing.attributes.update(attrs)
             if context_agent is not None:
-                if (
-                    not getattr(existing, "agent_name", None)
-                    and context_agent_name is not None
-                ):
+                if not getattr(existing, "agent_name", None) and context_agent_name is not None:
                     existing.agent_name = context_agent_name
                 if not getattr(existing, "agent_id", None):
                     existing.agent_id = str(context_agent.run_id)
@@ -737,12 +730,9 @@ class LangchainCallbackHandler(BaseCallbackHandler):
             if context_agent_name is not None:
                 tool.agent_name = context_agent_name
             tool.agent_id = str(context_agent.run_id)
-        # Inherit provider from ANY parent context (Agent, Workflow, or Step)
-        # This works for both multi-agent and single-workflow patterns
         inherited_provider = self._find_nearest_provider_context(parent_run_id)
         if inherited_provider:
             tool.provider = inherited_provider
-        # Also check metadata for provider hint (some frameworks pass it there)
         if not tool.provider and metadata:
             provider_hint = metadata.get("ls_provider") or metadata.get("provider")
             if provider_hint:
@@ -760,7 +750,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         output: Any,
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
+        parent_run_id: UUID | None = None,
         **_kwargs: Any,
     ) -> None:
         tool = self._handler.get_entity(run_id)
@@ -772,16 +762,14 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         self._handler.stop_tool_call(tool)
 
     def _fail(self, run_id: UUID, error: BaseException) -> None:
-        self._handler.fail_by_run_id(
-            run_id, GenAIError(message=str(error), type=type(error))
-        )
+        self._handler.fail_by_run_id(run_id, GenAIError(message=str(error), type=type(error)))
 
     def on_llm_error(
         self,
         error: BaseException,
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
+        parent_run_id: UUID | None = None,
         **_: Any,
     ) -> None:
         self._fail(run_id, error)
@@ -791,7 +779,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         error: BaseException,
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
+        parent_run_id: UUID | None = None,
         **_: Any,
     ) -> None:
         self._fail(run_id, error)
@@ -801,7 +789,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         error: BaseException,
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
+        parent_run_id: UUID | None = None,
         **_: Any,
     ) -> None:
         self._fail(run_id, error)
@@ -811,7 +799,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         error: BaseException,
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
+        parent_run_id: UUID | None = None,
         **_: Any,
     ) -> None:
         self._fail(run_id, error)
@@ -821,7 +809,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         error: BaseException,
         *,
         run_id: UUID,
-        parent_run_id: Optional[UUID] = None,
+        parent_run_id: UUID | None = None,
         **_: Any,
     ) -> None:
         self._fail(run_id, error)
