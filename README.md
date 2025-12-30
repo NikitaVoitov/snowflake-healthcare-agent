@@ -233,16 +233,19 @@ healthcare/
 │   ├── langchain-snowflake/                         # langchain-snowflake bug fixes
 │   │   ├── langchain_snowflake_streaming_patched.py # ToolCallChunk for streaming
 │   │   ├── langchain_snowflake_base_patched.py      # disable_streaming parameter
-│   │   ├── langchain_snowflake_tools_patched.py     # Message format + tool name fixes
+│   │   ├── langchain_snowflake_tools_patched.py     # Message format + tool name + inference metadata
+│   │   ├── langchain_snowflake_utils_patched.py     # Response metadata for OTel attributes
 │   │   └── langchain_snowflake_rest_client_patched.py # SNOWFLAKE_HOST fix
 │   │
 │   └── splunk-otel-python-contrib/                  # OpenTelemetry instrumentation patches
-│       ├── callback_handler_patched.py              # Parent span linking, model extraction
-│       ├── span_emitter_patched.py                  # Tool attributes, Snowflake metadata
+│       ├── callback_handler_patched.py              # Parent span linking, model extraction, Cortex Inference
+│       ├── span_emitter_patched.py                  # Tool attributes, Snowflake metadata parsing
 │       ├── types_patched.py                         # parent_span field for hierarchy
-│       ├── attributes_patched.py                    # Snowflake Cortex Search constants
-│       ├── instruments_patched.py                   # Search score histogram with buckets
-│       ├── metrics_patched.py                       # Metric recording with exemplars
+│       ├── attributes_patched.py                    # Snowflake Cortex attribute constants
+│       ├── instruments_patched.py                   # Search score histogram, cost metrics
+│       ├── metrics_patched.py                       # Cost metric recording with exemplars
+│       ├── config_patched.py                        # Pricing configuration parsing
+│       ├── environment_variables_patched.py         # Pricing environment variable definitions
 │       ├── apply_patches.sh                         # Apply patches to .venv
 │       ├── revert_patches.sh                        # Revert patches
 │       └── README.md                                # Detailed patch documentation
@@ -325,6 +328,44 @@ Custom span attributes for Snowflake Cortex Search observability:
 | `snowflake.cortex_search.top_score` | Top cosine similarity score | `0.446` |
 | `snowflake.cortex_search.result_count` | Number of search results | `9` |
 | `snowflake.cortex_search.sources` | Search sources queried | `transcripts` |
+| `snowflake.database` | Snowflake database context | `HEALTHCARE_DB` |
+| `snowflake.schema` | Snowflake schema context | `KNOWLEDGE_SCHEMA` |
+| `snowflake.warehouse` | Snowflake warehouse context | `PAYERS_CC_WH` |
+
+### Snowflake Cortex Analyst Attributes
+
+Custom span attributes for Snowflake Cortex Analyst (NL→SQL) observability:
+
+| Attribute | Description | Example |
+|-----------|-------------|---------|
+| `snowflake.database` | Snowflake database | `HEALTHCARE_DB` |
+| `snowflake.schema` | Snowflake schema | `PUBLIC` |
+| `snowflake.warehouse` | Snowflake warehouse | `PAYERS_CC_WH` |
+| `cortex_analyst.semantic_model.name` | Semantic model path | `@HEALTHCARE_DB.STAGING/.../model.yaml` |
+| `cortex_analyst.semantic_model.type` | Model type | `FILE_ON_STAGE` |
+| `cortex_analyst.request_id` | Snowflake request ID | `4867f778-d2da-...` |
+| `cortex_analyst.sql` | Generated SQL query | `SELECT * FROM...` |
+| `cortex_analyst.model_names` | LLM models used | `['claude-4-sonnet']` |
+| `cortex_analyst.question_category` | Query classification | `CLEAR_SQL` |
+| `cortex_analyst.verified_query.name` | Matched VQR name | `member_details` |
+| `cortex_analyst.verified_query.question` | VQR question | `Tell me about member...` |
+| `cortex_analyst.verified_query.sql` | VQR SQL template | `SELECT DISTINCT...` |
+| `cortex_analyst.verified_query.verified_at` | VQR verification timestamp | `1734739200` |
+| `cortex_analyst.verified_query.verified_by` | VQR verifier | `system` |
+| `cortex_analyst.warnings_count` | Number of warnings | `0` |
+
+### Snowflake Cortex Inference Attributes
+
+Attributes for LLM completion calls via `/api/v2/cortex/inference:complete`:
+
+| Attribute | Description | Example |
+|-----------|-------------|---------|
+| `gen_ai.response.id` | Snowflake response ID (OTel GenAI semconv) | `1855de73-2d56-...` |
+| `gen_ai.response.finish_reasons` | Completion finish reasons (OTel GenAI semconv) | `["stop"]` |
+| `snowflake.inference.guard_tokens` | Guard tokens consumed | `15` |
+| `snowflake.database` | Session database context | `HEALTHCARE_DB` |
+| `snowflake.schema` | Session schema context | `PUBLIC` |
+| `snowflake.warehouse` | Session warehouse context | `PAYERS_CC_WH` |
 
 ### Search Quality Metric
 
@@ -343,6 +384,27 @@ This enables:
 - **Alerting** on low search quality (p50/p95 < threshold)
 - **Trending** search relevance over time
 - **Correlation** with user satisfaction metrics
+
+### Snowflake Cortex Cost Metrics
+
+Automatic cost estimation metrics for Snowflake Cortex services:
+
+| Metric | Type | Unit | Description |
+|--------|------|------|-------------|
+| `snowflake.cortex_analyst.messages` | Counter | `{message}` | Messages processed by Cortex Analyst |
+| `snowflake.cortex_search.queries` | Counter | `{query}` | Queries processed by Cortex Search |
+| `snowflake.cortex.credits` | Counter | `{credit}` | Total Snowflake credits consumed |
+| `snowflake.cortex.cost` | Counter | `USD` | Estimated cost in USD |
+
+**Pricing Configuration** (via environment variables):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_SNOWFLAKE_CORTEX_ANALYST_CREDITS_PER_MESSAGE` | `0.067` | Credits per Analyst message |
+| `OTEL_SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_1000_QUERIES` | `1.7` | Credits per 1000 Search queries |
+| `OTEL_SNOWFLAKE_CREDIT_PRICE_USD` | `3.00` | USD price per Snowflake credit |
+
+Adjust these values based on your Snowflake contract pricing.
 
 ### Trace Hierarchy
 
@@ -390,8 +452,22 @@ We contributed patches to fix issues with LangChain/LangGraph instrumentation:
 | Model name extraction | `gen_ai.request.model` for ChatSnowflake |
 | Tool call ID extraction | `gen_ai.tool.call.id` from LangGraph ToolNode |
 | Provider inheritance | `gen_ai.provider.name` propagated to tool spans |
-| Snowflake attributes | Cortex Search metadata on tool spans |
-| Search score histogram | Pre-configured buckets for cosine similarity |
+| Cortex Search attributes | Request ID, scores, sources, connection context |
+| Cortex Analyst attributes | Semantic model, SQL, VQR, question category |
+| Cortex Inference attributes | `gen_ai.response.id`, finish reasons, guard tokens |
+| Search score histogram | Pre-configured buckets for cosine similarity (0.0-1.0) |
+| Cost metrics | Credits, messages, queries, USD cost estimation |
+| Pricing configuration | Environment variables for custom Snowflake pricing |
+
+**Patched Files:**
+- `callback_handler_patched.py` - Parent span linking, model extraction, Cortex Inference attributes
+- `span_emitter_patched.py` - Tool attributes, Snowflake metadata parsing
+- `types_patched.py` - `parent_span` field for hierarchy
+- `attributes_patched.py` - Snowflake Cortex attribute constants
+- `instruments_patched.py` - Search score histogram, cost metrics
+- `metrics_patched.py` - Cost metric recording with exemplars
+- `config_patched.py` - Pricing configuration parsing
+- `environment_variables_patched.py` - Pricing environment variable definitions
 
 See `patches/splunk-otel-python-contrib/README.md` for full details.
 
@@ -494,6 +570,11 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 OTEL_SERVICE_NAME=healthcare-agent
 OTEL_EXPORTER_OTLP_ENDPOINT=http://your-otel-collector:4317
 OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+
+# Snowflake Cortex Cost Estimation (optional - for cost metrics)
+OTEL_SNOWFLAKE_CORTEX_ANALYST_CREDITS_PER_MESSAGE=0.067
+OTEL_SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_1000_QUERIES=1.7
+OTEL_SNOWFLAKE_CREDIT_PRICE_USD=3.00
 ```
 
 ### SPCS Deployment
