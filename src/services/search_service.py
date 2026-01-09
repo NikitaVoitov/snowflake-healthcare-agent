@@ -39,33 +39,33 @@ def get_cortex_search_retrievers(
     schema = "KNOWLEDGE_SCHEMA"
     k = settings.cortex_search_limit
 
+    # Base config shared by both environments
+    # NOTE: We rely on session token auth (extracted from Snowpark session)
+    # rather than JWT auth (which requires public key fingerprint).
+    # Session token auth works for both local dev and SPCS.
+    common_params = {
+        "session": session,
+        "database": database,
+        "schema": schema,
+        "k": k,
+        "auto_format_for_rag": False,  # We format ourselves
+    }
+
     retrievers = {
         "faqs": SnowflakeCortexSearchRetriever(
             service_name=f"{database}.{schema}.FAQS_SEARCH",
-            session=session,
-            database=database,
-            schema=schema,  # Required by SnowflakeConnectionMixin
-            k=k,
             search_columns=["faq_id", "question", "answer", "category"],
-            auto_format_for_rag=False,  # We format ourselves
+            **common_params,
         ),
         "policies": SnowflakeCortexSearchRetriever(
             service_name=f"{database}.{schema}.POLICIES_SEARCH",
-            session=session,
-            database=database,
-            schema=schema,  # Required by SnowflakeConnectionMixin
-            k=k,
             search_columns=["policy_id", "policy_name", "content"],
-            auto_format_for_rag=False,
+            **common_params,
         ),
         "transcripts": SnowflakeCortexSearchRetriever(
             service_name=f"{database}.{schema}.TRANSCRIPTS_SEARCH",
-            session=session,
-            database=database,
-            schema=schema,  # Required by SnowflakeConnectionMixin
-            k=k,
             search_columns=["transcript_id", "member_id", "summary", "transcript_text"],
-            auto_format_for_rag=False,
+            **common_params,
         ),
     }
 

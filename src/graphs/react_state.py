@@ -1,7 +1,9 @@
 """ReAct state definitions for Healthcare Agent workflow.
 
-Uses LangGraph's message-based state pattern for compatibility with
-ToolNode and modern agent patterns.
+Updated for LangChain v1 / LangGraph v1:
+- Extends `AgentState` from `langchain.agents` (new in v1)
+- `messages` field is inherited from AgentState with `add_messages` reducer
+- Custom healthcare fields added for member context and conversation history
 
 The messages field accumulates the conversation within a single turn:
 - HumanMessage: User query
@@ -14,8 +16,8 @@ Conversation history persists across turns via the Snowflake checkpointer.
 
 from typing import Annotated, TypedDict
 
+from langchain.agents import AgentState
 from langchain_core.messages import AnyMessage
-from langgraph.graph.message import add_messages
 
 
 class ConversationTurn(TypedDict):
@@ -41,24 +43,22 @@ def _append_turns(existing: list[ConversationTurn], new: list[ConversationTurn])
     return combined[-max_turns:]
 
 
-class HealthcareAgentState(TypedDict, total=False):
+class HealthcareAgentState(AgentState, total=False):
     """Message-based state for healthcare agent workflow.
 
-    Uses LangGraph's add_messages reducer for the messages field,
-    enabling automatic handling of message deduplication and updates.
+    Extends LangChain v1's AgentState which provides:
+    - messages: Annotated[list[AnyMessage], add_messages]  # Core message stream
+    - jump_to: JumpTo | None  # Internal control flow
+    - structured_response: ResponseT | None  # Structured output
 
-    The messages field replaces the old scratchpad pattern:
-    - Old: scratchpad with ReActStep dicts
-    - New: messages with HumanMessage, AIMessage (tool_calls), ToolMessage
+    The `messages` field is inherited and uses add_messages reducer for
+    automatic handling of message deduplication and updates.
+
+    Custom healthcare fields extend the base state for:
+    - Member context (member_id, tenant_id)
+    - Conversation history for multi-turn context
+    - Execution control (iteration limits, execution tracking)
     """
-
-    # ==========================================================================
-    # Core Message Stream (LangGraph standard pattern)
-    # ==========================================================================
-    # Messages accumulate via add_messages reducer:
-    # [HumanMessage] → [HumanMessage, AIMessage(tool_calls)] →
-    # [HumanMessage, AIMessage(tool_calls), ToolMessage] → ...
-    messages: Annotated[list[AnyMessage], add_messages]
 
     # ==========================================================================
     # Healthcare Context (custom fields)

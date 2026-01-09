@@ -330,6 +330,184 @@ result = await self.graph.ainvoke(initial_state, config=config)
   - `workflow_type` → `wf.workflow_type` (auto: `"graph"`)
   - `framework` → `wf.framework` (auto: `"langgraph"`)
 
+### 12. Agent Detection and Tag-Based Attribute Passing (Critical Fix)
+
+**Problem:** LangGraph applications using `.with_config()` to mark a graph as an "agent" (for Splunk O11y Agent Flow visualization) had their metadata completely replaced by LangGraph dev server's internal metadata.
+
+**Root Cause Analysis:**
+
+LangGraph dev server behavior:
+- ❌ **Metadata is REPLACED** with system metadata (`graph_id`, `langgraph_version`, `run_id`, etc.)
+- ✅ **Tags are MERGED/PRESERVED** with user-specified tags
+
+This means custom metadata fields like `agent_name`, `agent_type`, `agent_description`, `agent_tools` never reach the OTel callback handler.
+
+**Debug Evidence:**
+```python
+# Config set on compiled graph:
+react_healthcare_graph = compiled_graph.with_config({
+    "tags": ["agent", "agent:healthcare_agent"],
+    "metadata": {"agent_name": "healthcare_agent", "agent_type": "react", ...}
+})
+
+# What callback handler actually receives:
+tags=['agent', 'agent:healthcare_agent', 'agent_type:react', ...]  # ✅ Preserved!
+metadata_keys=['graph_id', 'langgraph_version', 'run_id', ...]  # ❌ Our metadata REPLACED!
+```
+
+**Solution:**
+
+Pass agent attributes via **tags** instead of metadata using the format `key:value`:
+
+```python
+# In react_workflow.py - Pass agent attributes via tags (preserved by LangGraph dev server)
+_TOOL_NAMES_STR = ",".join([tool.name for tool in HEALTHCARE_TOOLS])
+
+react_healthcare_graph = compile_react_graph(use_checkpointer=False).with_config({
+    "run_name": "healthcare_agent",
+    "tags": [
+        "agent",  # Triggers invoke_agent span type
+        "agent:healthcare_agent",  # gen_ai.agent.name
+        "agent_type:react",  # gen_ai.agent.type
+        "agent_description:Healthcare ReAct agent for member inquiries",  # gen_ai.agent.description
+        f"agent_tools:{_TOOL_NAMES_STR}",  # gen_ai.agent.tools (comma-separated)
+    ],
+    # Metadata still included for non-LangGraph-dev invocations (fallback)
+    "metadata": {"agent_name": "healthcare_agent", ...}
+})
+```
+
+**Tag Parsing in Callback Handler:**
+
+The `_start_agent_invocation()` method parses these tags:
+
+```python
+# callback_handler.py - _start_agent_invocation()
+if attrs and attrs.get("tags"):
+    for tag in attrs["tags"]:
+        if tag.startswith("agent_type:"):
+            agent.agent_type = tag[11:]  # "react"
+        elif tag.startswith("agent_description:"):
+            agent.description = tag[18:]  # Full description
+        elif tag.startswith("agent_tools:"):
+            agent.tools = tag[12:].split(",")  # ["tool1", "tool2"]
+```
+
+**Result:**
+
+Traces now correctly show:
+```
+invoke_agent healthcare_agent [op:invoke_agent]
+  gen_ai.agent.name: healthcare_agent
+  gen_ai.agent.type: react
+  gen_ai.agent.description: Healthcare ReAct agent for member inquiries
+  gen_ai.agent.tools: ["query_member_data", "search_knowledge"]
+  │
+  ├── step model
+  │   └── chat claude-3-5-sonnet
+  └── step tools
+      └── tool query_member_data
+```
+
+**Files Changed:**
+- `callback_handler.py`: `_start_agent_invocation()` already had tag parsing logic; no changes needed
+- (Application code): Updated `react_workflow.py` to pass agent attributes via tags
+
+### 13. Token Usage Extraction for Streaming Mode (Critical Fix)
+
+**Problem:** When LLM streaming is enabled (`ENABLE_LLM_STREAMING=true`), the `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` attributes were **missing** from `chat` spans, even though token usage was being tracked by LangChain.
+
+**Impact:** Without token usage in traces:
+- ❌ No cost tracking for streaming LLM calls
+- ❌ No token usage metrics (histograms, counters)
+- ❌ Incomplete observability for production deployments
+
+**Root Cause Analysis:**
+
+When streaming is **OFF**, LangChain stores token usage in:
+```python
+response.llm_output["token_usage"] = {
+    "prompt_tokens": 10430,
+    "completion_tokens": 117
+}
+```
+
+When streaming is **ON**, LangChain aggregates streaming chunks and stores token usage differently:
+```python
+response.generations[0][0].message.usage_metadata = {
+    "input_tokens": 10430,
+    "output_tokens": 117
+}
+```
+
+The original `on_llm_end()` callback handler ONLY checked `llm_output.token_usage`, missing the `usage_metadata` path entirely.
+
+**Debug Evidence:**
+```json
+// Trace with streaming OFF (tokens present):
+{
+  "operationName": "chat claude-3-5-sonnet",
+  "tags": {
+    "gen_ai.usage.input_tokens": 10430,
+    "gen_ai.usage.output_tokens": 117
+  }
+}
+
+// Trace with streaming ON (tokens MISSING):
+{
+  "operationName": "chat claude-3-5-sonnet",
+  "tags": {
+    // No token usage attributes!
+  }
+}
+```
+
+**Solution:**
+
+Modified `on_llm_end()` to extract token usage from multiple sources with priority:
+
+1. **First** check `message.usage_metadata` (streaming mode - LangChain aggregates here)
+2. **Fallback** to `llm_output.token_usage` (non-streaming mode - legacy format)
+
+```python
+# callback_handler.py - on_llm_end()
+
+# First, try to extract from message.usage_metadata (streaming mode)
+if generations:
+    for generation_list in generations:
+        for generation in generation_list:
+            if hasattr(generation, "message") and hasattr(generation.message, "usage_metadata"):
+                usage_meta = getattr(generation.message, "usage_metadata", None)
+                if isinstance(usage_meta, dict) and usage_meta:
+                    in_val = usage_meta.get("input_tokens") or usage_meta.get("prompt_tokens")
+                    out_val = usage_meta.get("output_tokens") or usage_meta.get("completion_tokens")
+                    # ... extract values
+
+# Fallback to llm_output.token_usage (non-streaming mode)
+if input_tokens is None or output_tokens is None:
+    llm_output = getattr(response, "llm_output", {}) or {}
+    usage = llm_output.get("usage") or llm_output.get("token_usage") or {}
+    # ... extract values
+```
+
+**Result:**
+
+Token usage is now captured correctly in both modes:
+```json
+// Trace with streaming ON (tokens now present):
+{
+  "operationName": "chat claude-3-5-sonnet",
+  "tags": {
+    "gen_ai.usage.input_tokens": 12673,
+    "gen_ai.usage.output_tokens": 72,
+    "gen_ai.response.finish_reasons": ["tool_calls"]
+  }
+}
+```
+
+**Files Changed:**
+- `callback_handler.py`: Updated `on_llm_end()` to check `usage_metadata` before `llm_output.token_usage`
+
 ## Patched Files Summary
 
 | File | Target Location | Description |

@@ -60,6 +60,15 @@ def set_session(session: Session) -> None:
     logger.info("Snowpark session cached for ChatSnowflake")
 
 
+def get_cached_session() -> Session | None:
+    """Get the cached Snowpark session (if set).
+
+    Returns:
+        The cached session or None if not set.
+    """
+    return _cached_session
+
+
 def get_session() -> Session | None:
     """Get the cached Snowpark session."""
     return _cached_session
@@ -234,6 +243,50 @@ def _create_snowpark_session_sync(private_key_bytes: bytes) -> Session:
     return session
 
 
+def init_session_sync() -> Session:
+    """Initialize Snowpark session synchronously (for module-level init).
+
+    Creates connection using local credentials (key pair auth).
+    Used when building agent synchronously at module load time.
+
+    This is the SINGLE source of truth for session initialization.
+    The session is cached and shared by ChatSnowflake and tools.
+
+    Returns:
+        Active Snowpark Session.
+
+    Raises:
+        ValueError: If required credentials are missing.
+        Exception: If session creation fails.
+    """
+    global _cached_session
+
+    if _cached_session is not None:
+        return _cached_session
+
+    # Validate required credentials
+    if not settings.snowflake_account:
+        raise ValueError("SNOWFLAKE_ACCOUNT required")
+    if not settings.snowflake_user:
+        raise ValueError("SNOWFLAKE_USER required")
+    if not settings.snowflake_private_key_path:
+        raise ValueError("SNOWFLAKE_PRIVATE_KEY_PATH required")
+
+    logger.info("Initializing Snowpark session (sync) with key pair auth")
+
+    # Load private key
+    private_key_bytes = _load_private_key_sync(
+        settings.snowflake_private_key_path,
+        settings.snowflake_private_key_passphrase,
+    )
+
+    # Create session
+    _cached_session = _create_snowpark_session_sync(private_key_bytes)
+    logger.info("Snowpark session initialized (sync) and cached")
+
+    return _cached_session
+
+
 async def _get_or_create_session() -> Session:
     """Get or create a cached Snowpark session (ASYNC with locking)."""
     global _cached_session
@@ -306,12 +359,17 @@ async def _create_local_chat_model(model: str, temperature: float) -> ChatSnowfl
 
     logger.debug("Snowpark session ready for ChatSnowflake")
 
-    # Use session-only mode - REST API private key auth has issues with "Password is empty" error
-    # Tool calling works via session's SQL mode
+    # Pass both session (for SQL mode) and key-pair creds (for REST API mode when tools are bound)
+    # When create_agent binds tools, it switches to REST API which needs JWT auth
     return ChatSnowflake(
         model=model,
         temperature=temperature,
         session=session,
+        # Key-pair credentials for REST API JWT authentication (used when tools are bound)
+        account=settings.snowflake_account,
+        user=settings.snowflake_user,
+        private_key_path=settings.snowflake_private_key_path,
+        private_key_passphrase=settings.snowflake_private_key_passphrase,
         # Disable streaming by default to avoid "No generations found in stream" error
         # Set ENABLE_LLM_STREAMING=true after applying langchain-snowflake patches
         disable_streaming=not ENABLE_LLM_STREAMING,

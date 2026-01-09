@@ -204,7 +204,8 @@ healthcare/
 │       ├── analyst_service.py           # SnowflakeCortexAnalyst factory
 │       ├── search_service.py            # SnowflakeCortexSearchRetriever factory
 │       ├── cortex_tools.py              # AsyncCortexAnalystTool, AsyncCortexSearchTool
-│       └── snowflake_checkpointer.py    # SQLAlchemy-based LangGraph checkpointer
+│       ├── snowflake_checkpointer.py    # SQLAlchemy-based LangGraph checkpointer
+│       └── snowflake_session.py         # SPCS token_file_path + resilient session wrapper
 │
 ├── scripts/
 │   ├── sql/
@@ -272,7 +273,7 @@ healthcare/
 | **Semantic Model** | NL→SQL via `SnowflakeCortexAnalyst` with verified queries |
 | **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
-| **SPCS OAuth + Auto-Refresh** | Automatic token refresh when SPCS OAuth tokens expire |
+| **SPCS OAuth + Auto-Refresh** | Automatic token refresh via `token_file_path` when SPCS OAuth tokens expire |
 | **Modern Error Handling** | Native LangGraph `RetryPolicy` with automatic retries (max 3 attempts) |
 | **Token-Level Streaming** | Real-time LLM output + tool call progress via SSE (patched `langchain-snowflake`) |
 | **Container Runtime** | Streamlit app runs on SPCS compute pool with internal DNS access |
@@ -455,12 +456,13 @@ We contributed patches to fix issues with LangChain/LangGraph instrumentation:
 | Cortex Search attributes | Request ID, scores, sources, connection context |
 | Cortex Analyst attributes | Semantic model, SQL, VQR, question category |
 | Cortex Inference attributes | `gen_ai.response.id`, finish reasons, guard tokens |
+| Streaming token usage | Token counts from `usage_metadata` in streaming responses |
 | Search score histogram | Pre-configured buckets for cosine similarity (0.0-1.0) |
 | Cost metrics | Credits, messages, queries, USD cost estimation |
 | Pricing configuration | Environment variables for custom Snowflake pricing |
 
 **Patched Files:**
-- `callback_handler_patched.py` - Parent span linking, model extraction, Cortex Inference attributes
+- `callback_handler_patched.py` - Parent span linking, model extraction, Cortex Inference, streaming token usage
 - `span_emitter_patched.py` - Tool attributes, Snowflake metadata parsing
 - `types_patched.py` - `parent_span` field for hierarchy
 - `attributes_patched.py` - Snowflake Cortex attribute constants
@@ -581,7 +583,7 @@ OTEL_SNOWFLAKE_CREDIT_PRICE_USD=3.00
 
 ```bash
 # Build Docker image for linux/amd64 (Distroless)
-VERSION=1.0.87
+VERSION=1.0.100
 docker buildx build --platform linux/amd64 -t healthcare-agent:$VERSION .
 
 # Tag and push to Snowflake registry

@@ -1,11 +1,11 @@
-"""Modern ReAct workflow using LangGraph message-based state and ToolNode - FULLY ASYNC.
+"""Modern Healthcare Agent using LangChain v1 create_agent - FULLY ASYNC.
 
-Implements the Reasoning + Acting pattern with:
-- Message-based state (HumanMessage, AIMessage, ToolMessage)
-- @tool decorated functions for automatic schema generation
-- ToolNode for automatic tool execution
-- Tool calls routing via AIMessage.tool_calls
-- RetryPolicy for automatic retry on transient failures
+Implements a TRUE AGENT using LangChain v1's create_agent which provides:
+- LLM-controlled decision loop (not hardcoded workflow)
+- Dynamic prompt generation via @dynamic_prompt middleware
+- Automatic tool binding and execution
+- Built-in retry and error handling
+- Integration with checkpointers for conversation persistence
 
 Uses ChatSnowflake from langchain-snowflake for native Cortex integration
 with automatic tool binding and async support.
@@ -13,10 +13,12 @@ with automatic tool binding and async support.
 ALL blocking operations are wrapped in asyncio.to_thread() to avoid
 blocking the event loop.
 
-Error Handling Strategy (per LangGraph best practices):
-- Transient errors (network, rate limits): Automatic retry via RetryPolicy
-- LLM-recoverable errors: Return error as AIMessage content, let LLM adjust
-- Unexpected errors: Let them bubble up for debugging
+Migration from StateGraph-based workflow:
+- model_node → replaced by create_agent internal model loop
+- route_after_model → replaced by agent's automatic tool/answer routing
+- final_answer_node → handled via middleware/state
+- ToolNode → automatically created by create_agent
+- Dynamic system prompt → @dynamic_prompt middleware
 """
 
 # Initialize OpenTelemetry instrumentation BEFORE any LangChain imports
@@ -25,452 +27,256 @@ from src.otel_setup import setup_opentelemetry
 
 setup_opentelemetry()
 
-import asyncio
 import logging
-from typing import Literal
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, StateGraph
-from langgraph.prebuilt import ToolNode
-from langgraph.types import RetryPolicy
+from langgraph.graph.state import CompiledStateGraph
 
 from src.config import settings
-from src.graphs.react_prompts import build_system_message
-from src.graphs.react_state import (
-    ConversationTurn,
-    FinalAnswerOutput,
-    HealthcareAgentState,
-    ModelOutput,
+from src.graphs.react_state import ConversationTurn, HealthcareAgentState
+from src.middleware.healthcare_prompts import create_healthcare_middleware
+
+# Centralized session management - ONE source of truth
+from src.services.llm_service import (
+    get_chat_snowflake,
+    init_session_sync,
+    set_session,
 )
-from src.services.llm_service import get_chat_snowflake
 from src.tools.healthcare_tools import get_healthcare_tools
-from src.tools.healthcare_tools import set_snowpark_session as set_tools_session
 
 logger = logging.getLogger(__name__)
 
-# Module-level session for SPCS OAuth token auth (used by tools)
-_snowpark_session = None
-_session_initialized = False
-_session_lock = asyncio.Lock()
-
-# Get tools for ToolNode
+# Get tools for agent
 HEALTHCARE_TOOLS = get_healthcare_tools()
-TOOL_NODE = ToolNode(HEALTHCARE_TOOLS)
 
 # Tool name to function mapping for schema generation
 TOOLS_BY_NAME = {tool.name: tool for tool in HEALTHCARE_TOOLS}
 
+# Extract tool names for agentic attribution in traces
+_TOOL_NAMES = [tool.name for tool in HEALTHCARE_TOOLS]
+_TOOL_NAMES_STR = ",".join(_TOOL_NAMES)
 
+
+# Backward compatibility alias - delegates to centralized llm_service
 def set_snowpark_session(session) -> None:
-    """Set the Snowpark session for use by workflow nodes.
+    """Set the Snowpark session (delegates to llm_service.set_session).
 
     In SPCS, this is called during app startup with the OAuth-authenticated session.
-    The session is used by tools (Cortex Analyst, Cortex Search) not by ChatSnowflake.
+    The session is shared by both ChatSnowflake and tools.
     """
-    global _snowpark_session, _session_initialized
-    _snowpark_session = session
-    _session_initialized = True
-    # Also set session for tools module
-    set_tools_session(session)
-    logger.info("Snowpark session set for ReAct workflow")
-
-
-async def _ensure_snowpark_session_async() -> None:
-    """Ensure Snowpark session is initialized (ASYNC with locking).
-
-    Initializes the session lazily on first use, avoiding blocking at module load.
-    """
-    global _snowpark_session, _session_initialized
-
-    if _session_initialized:
-        return
-
-    async with _session_lock:
-        # Double-check after acquiring lock
-        if _session_initialized:
-            return
-
-        logger.info("Lazy-initializing Snowpark session...")
-        await _initialize_snowpark_session_async()
-
-
-async def _initialize_snowpark_session_async() -> None:
-    """Initialize Snowpark session asynchronously.
-
-    Creates connection using either:
-    - SPCS OAuth token (when running in Snowpark Container Services)
-    - Local credentials (when running in development)
-
-    Note: This session is used by tools (Cortex Analyst, Cortex Search),
-    not by ChatSnowflake which manages its own connection.
-    """
-    global _snowpark_session, _session_initialized
-
-    if _session_initialized:
-        return
-
-    if settings.is_spcs:
-        # SPCS mode - use OAuth token
-        import os
-        from pathlib import Path
-
-        logger.info("Initializing Snowpark session with SPCS OAuth token")
-        token_path = Path("/snowflake/session/token")
-
-        # Read token asynchronously
-        token = await asyncio.to_thread(token_path.read_text)
-
-        connection_params = {
-            "account": os.environ.get("SNOWFLAKE_ACCOUNT", ""),
-            "host": os.environ.get("SNOWFLAKE_HOST", ""),
-            "authenticator": "oauth",
-            "token": token,
-            "database": settings.snowflake_database,
-            "warehouse": settings.snowflake_warehouse,
-        }
-    else:
-        # Local mode - use key pair authentication
-        logger.info("Initializing Snowpark session with key pair authentication")
-        from cryptography.hazmat.backends import default_backend
-        from cryptography.hazmat.primitives import serialization
-
-        def _load_key_sync():
-            with open(settings.snowflake_private_key_path, "rb") as key_file:
-                private_key = serialization.load_pem_private_key(
-                    key_file.read(),
-                    password=settings.snowflake_private_key_passphrase.encode() if settings.snowflake_private_key_passphrase else None,
-                    backend=default_backend(),
-                )
-
-            return private_key.private_bytes(
-                encoding=serialization.Encoding.DER,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-
-        # Load key asynchronously
-        private_key_bytes = await asyncio.to_thread(_load_key_sync)
-
-        connection_params = {
-            "account": settings.snowflake_account,
-            "user": settings.snowflake_user,
-            "private_key": private_key_bytes,
-            "database": settings.snowflake_database,
-            "warehouse": settings.snowflake_warehouse,
-            "role": settings.snowflake_role,
-        }
-
-    # Create session asynchronously (blocking network call)
-    def _create_session_sync(params):
-        from snowflake.snowpark import Session
-
-        return Session.builder.configs(params).create()
-
-    try:
-        _snowpark_session = await asyncio.to_thread(_create_session_sync, connection_params)
-        set_snowpark_session(_snowpark_session)
-        _session_initialized = True
-        logger.info("Snowpark session initialized successfully for ReAct workflow")
-    except Exception as exc:
-        logger.error("Failed to initialize Snowpark session: %s", exc)
-        raise
+    set_session(session)
+    logger.info("Snowpark session set for healthcare agent (via llm_service)")
 
 
 # =============================================================================
-# Message Construction for ChatSnowflake
+# Agent Factory
 # =============================================================================
 
 
-def _build_chat_messages(state: HealthcareAgentState) -> list[BaseMessage]:
-    """Convert state to LangChain messages for ChatSnowflake.
+async def build_healthcare_agent(
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
+    """Build the healthcare agent using create_agent.
 
-    Builds a message list with:
-    1. System message containing healthcare context and tool guidance
-    2. User query as HumanMessage (if not already in messages)
-    3. Existing messages from state (AIMessage, ToolMessage)
+    This is an async factory that:
+    1. Gets ChatSnowflake with centralized session from llm_service
+    2. Uses create_agent with dynamic prompt middleware
 
     Args:
-        state: Current graph state with messages and context.
+        checkpointer: Optional checkpointer for state persistence.
 
     Returns:
-        List of messages ready for ChatSnowflake.ainvoke().
+        Compiled agent graph ready for execution.
     """
-    from langchain_core.messages import HumanMessage
+    # Get ChatSnowflake - llm_service handles session creation/caching
+    # Tools also use the same session via llm_service.get_session()
+    llm = await get_chat_snowflake()
 
-    messages: list[BaseMessage] = []
-
-    # Build system message with context
-    system_content = build_system_message(
-        member_id=state.get("member_id"),
-        conversation_history=state.get("conversation_history", []),
+    # Create the agent using LangChain v1 create_agent
+    # This replaces the manual StateGraph construction
+    agent = create_agent(
+        model=llm,
+        tools=HEALTHCARE_TOOLS,
+        middleware=create_healthcare_middleware(),
+        state_schema=HealthcareAgentState,
+        checkpointer=checkpointer,
+        name="healthcare_agent",
+        # Max iterations handled via state.max_iterations
     )
-    messages.append(SystemMessage(content=system_content))
 
-    # Add existing messages (AIMessage with tool_calls, ToolMessage, etc.)
-    existing_messages = state.get("messages", [])
-
-    # Check if we need to add the initial HumanMessage
-    # (On first call, messages is empty but user_query is set)
-    has_human_message = any(isinstance(m, HumanMessage) for m in existing_messages)
-    if not has_human_message and state.get("user_query"):
-        messages.append(HumanMessage(content=state["user_query"]))
-
-    messages.extend(existing_messages)
-
-    return messages
+    logger.info("Healthcare agent created with %d tools", len(HEALTHCARE_TOOLS))
+    return agent
 
 
-# =============================================================================
-# Graph Nodes
-# =============================================================================
+def build_healthcare_agent_sync(
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
+    """Build the healthcare agent synchronously (for module-level init).
 
+    This is a synchronous wrapper for build_healthcare_agent that:
+    1. Initializes Snowpark session via centralized llm_service
+    2. Creates ChatSnowflake with session
+    3. Uses create_agent with dynamic prompt middleware
 
-async def model_node(state: HealthcareAgentState) -> ModelOutput:
-    """Call ChatSnowflake and return AIMessage (ASYNC).
+    Args:
+        checkpointer: Optional checkpointer for state persistence.
 
-    This node:
-    1. Ensures Snowpark session is initialized (for tools)
-    2. Checks iteration limits
-    3. Builds messages from state
-    4. Calls ChatSnowflake with bound tools
-    5. Returns AIMessage (with tool_calls or final answer)
+    Returns:
+        Compiled agent graph ready for execution.
     """
-    # Ensure session is initialized (lazy initialization)
-    await _ensure_snowpark_session_async()
+    from langchain_snowflake import ChatSnowflake
 
-    iteration = state.get("iteration", 0) + 1
-    max_iterations = state.get("max_iterations", settings.max_agent_steps)
+    from src.services.llm_service import ENABLE_LLM_STREAMING, get_cached_session
 
-    # Check iteration limit - synthesize answer from collected data
-    if iteration > max_iterations:
-        logger.warning("Max iterations (%d) reached", max_iterations)
-        messages = state.get("messages", [])
-
-        # Extract data from the last ToolMessage (most recent result)
-        tool_data = None
-        for msg in reversed(messages):
-            if isinstance(msg, ToolMessage) and msg.content:
-                tool_data = msg.content
-                break
-
-        if tool_data:
-            # Use the data to synthesize an answer
-            answer = f"Based on my analysis:\n\n{tool_data}"
-            logger.info("Synthesized answer from tool data: %d chars", len(tool_data))
-        else:
-            answer = "I've reached my processing limit. Based on what I found, please try a more specific question."
-
-        return {
-            "messages": [AIMessage(content=answer)],
-            "iteration": iteration,
-        }
-
-    # Get ChatSnowflake with tools bound (ASYNC)
-
-    llm = await get_chat_snowflake(tools=HEALTHCARE_TOOLS)
-    logger.info("ChatSnowflake created, tools=%s", len(HEALTHCARE_TOOLS))
-
-    # DEBUG: Log bound tools count
-    if hasattr(llm, "_bound_tools"):
-        tool_count = len(llm._bound_tools) if llm._bound_tools else 0
-        logger.debug("Bound %d tools to LLM", tool_count)
-    else:
-        logger.debug("No _bound_tools attribute on LLM (SQL mode)")
-
-    # Build messages for LLM
-    messages = _build_chat_messages(state)
-
-    # DEBUG: Log messages being sent
-    logger.info("Messages count: %d, types: %s", len(messages), [type(m).__name__ for m in messages])
-
-    try:
-        # Call ChatSnowflake - returns AIMessage with tool_calls or content
-        ai_message = await llm.ainvoke(messages)
-
-        # Debug: Log detailed response info
-        has_tool_calls = bool(ai_message.tool_calls) if hasattr(ai_message, "tool_calls") else False
-        content_len = len(ai_message.content) if ai_message.content else 0
-        response_metadata = getattr(ai_message, "response_metadata", {})
-        usage_metadata = getattr(ai_message, "usage_metadata", {})
-
-        logger.info(
-            "ReAct iteration %d: tool_calls=%s, content_len=%d, content_preview=%s",
-            iteration,
-            has_tool_calls,
-            content_len,
-            (ai_message.content[:200] if ai_message.content else "EMPTY")[:200],
+    # Check if we're in SPCS mode
+    if settings.is_spcs:
+        # In SPCS, session is set by main.py during startup
+        session = get_cached_session()
+        if session is None:
+            raise ValueError("No Snowpark session available in SPCS mode. Ensure main.py calls llm_service.set_session() during startup.")
+        
+        # SPCS: Session-only auth (no key-pair credentials)
+        llm = ChatSnowflake(
+            model=settings.cortex_llm_model,
+            temperature=0,
+            disable_streaming=not ENABLE_LLM_STREAMING,
+            session=session,
         )
+        logger.info("ChatSnowflake created for SPCS (session-only auth)")
+    else:
+        # Local: Initialize session with key-pair credentials
+        session = init_session_sync()
+        
+        # Create ChatSnowflake WITH session AND key-pair credentials
+        # Session is used for SQL mode, key-pair credentials for REST API (when tools are bound)
+        llm = ChatSnowflake(
+            model=settings.cortex_llm_model,
+            temperature=0,
+            disable_streaming=not ENABLE_LLM_STREAMING,
+            session=session,
+            # Key-pair credentials for REST API JWT auth (used when create_agent binds tools)
+            account=settings.snowflake_account,
+            user=settings.snowflake_user,
+            private_key_path=settings.snowflake_private_key_path,
+            private_key_passphrase=settings.snowflake_private_key_passphrase,
+        )
+        logger.info("ChatSnowflake created for local (key-pair auth)")
 
-        # Log additional debugging info if response is empty
-        if content_len == 0 and not has_tool_calls:
-            logger.warning(
-                "Empty LLM response! response_metadata=%s, usage_metadata=%s, additional_kwargs=%s",
-                response_metadata,
-                usage_metadata,
-                getattr(ai_message, "additional_kwargs", {}),
-            )
-
-        return {
-            "messages": [ai_message],
-            "iteration": iteration,
-        }
-
-    except Exception as e:
-        # LLM-recoverable error pattern: Return error as message content
-        # The LLM can see what went wrong and adjust on next iteration
-        logger.error("ChatSnowflake call failed: %s", e, exc_info=True)
-        return {
-            "messages": [AIMessage(content=f"I encountered an error while processing: {e!s}. Let me try a different approach.")],
-            "iteration": iteration,
-        }
-
-
-async def final_answer_node(state: HealthcareAgentState) -> FinalAnswerOutput:
-    """Extract final answer and save to conversation history."""
-    messages = state.get("messages", [])
-    user_query = state.get("user_query", "")
-    member_id = state.get("member_id")
-
-    # Get final answer from last AIMessage and collect all tools used
-    final_answer = "I could not find an answer to your question."
-    tools_used = []
-
-    # First pass: collect all tools from messages (in order)
-    for msg in messages:
-        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
-            for tc in msg.tool_calls:
-                tools_used.append(tc["name"])
-
-    # Second pass: get final answer from last non-tool AIMessage
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage) and not (hasattr(msg, "tool_calls") and msg.tool_calls) and msg.content:
-            final_answer = msg.content
-            break
-
-    # Build conversation turn for history
-    turn = ConversationTurn(
-        user_query=user_query,
-        member_id=member_id,
-        final_answer=final_answer,
-        tools_used=list(reversed(tools_used)),  # Chronological order
+    # Create the agent using LangChain v1 create_agent
+    agent = create_agent(
+        model=llm,
+        tools=HEALTHCARE_TOOLS,
+        middleware=create_healthcare_middleware(),
+        state_schema=HealthcareAgentState,
+        checkpointer=checkpointer,
+        name="healthcare_agent",
     )
 
-    logger.info("Final answer: %d chars, tools: %s", len(final_answer), tools_used)
-
-    return {
-        "final_answer": final_answer,
-        "conversation_history": [turn],
-    }
+    logger.info("Healthcare agent created (sync) with %d tools", len(HEALTHCARE_TOOLS))
+    return agent
 
 
 # =============================================================================
-# Routing Logic
+# Backward Compatibility: Compile Functions
 # =============================================================================
 
 
-def route_after_model(state: HealthcareAgentState) -> Literal["tools", "final_answer"]:
-    """Route based on model output.
+def compile_react_graph(
+    checkpointer: BaseCheckpointSaver | None = None,
+    use_checkpointer: bool = True,
+) -> CompiledStateGraph:
+    """Compile the healthcare agent with optional checkpointer.
 
-    Simple routing per LangGraph best practices:
-    - If AIMessage has tool_calls → route to tools
-    - Otherwise → route to final_answer
-
-    Error handling is done via:
-    - RetryPolicy for transient failures (automatic)
-    - Error messages returned as AIMessage content (LLM-recoverable)
-    """
-    messages = state.get("messages", [])
-    if not messages:
-        # No messages - go to final answer with default response
-        logger.warning("No messages in state, routing to final_answer")
-        return "final_answer"
-
-    last_message = messages[-1]
-
-    # Check if it's an AIMessage with tool_calls
-    if isinstance(last_message, AIMessage):
-        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            logger.info("Routing to tools: %s", last_message.tool_calls[0]["name"])
-            return "tools"
-        else:
-            logger.info("Routing to final_answer")
-            return "final_answer"
-
-    # Unexpected message type - route to final_answer
-    logger.warning("Unexpected message type: %s, routing to final_answer", type(last_message))
-    return "final_answer"
-
-
-# =============================================================================
-# Graph Construction
-# =============================================================================
-
-
-def build_react_graph() -> StateGraph:
-    """Build the modern ReAct graph with ToolNode and RetryPolicy.
-
-    Graph structure:
-        START → model → [tools → model] (loop) → final_answer → END
-
-    The loop continues until model returns AIMessage without tool_calls.
-
-    Error handling (per LangGraph best practices):
-    - RetryPolicy on model/tools nodes for automatic retry on transient failures
-    - LLM-recoverable errors returned as AIMessage content
-    - Unexpected errors bubble up for debugging
-    """
-    graph = StateGraph(HealthcareAgentState)
-
-    # Retry policy for transient failures (network issues, rate limits)
-    # Retries with exponential backoff: 1s, 2s, 4s (max 3 attempts)
-    retry_policy = RetryPolicy(max_attempts=3, initial_interval=1.0, backoff_factor=2.0)
-
-    # Add nodes with retry policies
-    graph.add_node("model", model_node, retry_policy=retry_policy)
-    graph.add_node("tools", TOOL_NODE, retry_policy=retry_policy)
-    graph.add_node("final_answer", final_answer_node)
-
-    # Set entry point
-    graph.set_entry_point("model")
-
-    # Add edges - simple routing without error handler
-    graph.add_conditional_edges(
-        "model",
-        route_after_model,
-        {
-            "tools": "tools",
-            "final_answer": "final_answer",
-        },
-    )
-
-    # Tools loop back to model (the ReAct loop!)
-    graph.add_edge("tools", "model")
-
-    # Final answer ends the graph
-    graph.add_edge("final_answer", END)
-
-    return graph
-
-
-def compile_react_graph(checkpointer=None):
-    """Compile the ReAct graph with optional checkpointer.
+    This provides backward compatibility with existing code that uses
+    compile_react_graph(). It creates an agent using create_agent.
 
     Args:
         checkpointer: Optional LangGraph checkpointer for state persistence.
+        use_checkpointer: If False, compile without any checkpointer (for langgraph dev).
 
     Returns:
-        Compiled graph ready for execution.
+        Compiled agent graph ready for execution.
     """
-    graph = build_react_graph()
+    if not use_checkpointer:
+        # For langgraph dev mode - platform handles persistence
+        agent = build_healthcare_agent_sync(checkpointer=None)
+    else:
+        if checkpointer is None:
+            checkpointer = MemorySaver()
+        agent = build_healthcare_agent_sync(checkpointer=checkpointer)
 
-    if checkpointer is None:
-        checkpointer = MemorySaver()
+    logger.info("Healthcare agent compiled (backward compat)")
+    return agent
 
-    compiled = graph.compile(checkpointer=checkpointer)
-    logger.info("ReAct healthcare workflow graph compiled")
 
-    return compiled
+# =============================================================================
+# Result Extraction Helpers (for AgentService compatibility)
+# =============================================================================
+
+
+def extract_final_answer(state: HealthcareAgentState) -> str:
+    """Extract final answer from agent state.
+
+    Looks for the last AIMessage without tool_calls.
+
+    Args:
+        state: Agent state after execution.
+
+    Returns:
+        Final answer string.
+    """
+    messages = state.get("messages", [])
+    final_answer = state.get("final_answer", "")
+
+    if final_answer:
+        return final_answer
+
+    # Find last AIMessage without tool_calls
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and not (hasattr(msg, "tool_calls") and msg.tool_calls) and msg.content:
+            return msg.content
+
+    return "I could not find an answer to your question."
+
+
+def extract_tools_used(state: HealthcareAgentState) -> list[str]:
+    """Extract list of tools used from agent state.
+
+    Args:
+        state: Agent state after execution.
+
+    Returns:
+        List of tool names used.
+    """
+    messages = state.get("messages", [])
+    tools_used = []
+
+    for msg in messages:
+        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tools_used.append(tc.get("name", ""))
+
+    return tools_used
+
+
+def build_conversation_turn(state: HealthcareAgentState) -> ConversationTurn:
+    """Build a ConversationTurn from agent state.
+
+    Args:
+        state: Agent state after execution.
+
+    Returns:
+        ConversationTurn for history persistence.
+    """
+    return ConversationTurn(
+        user_query=state.get("user_query", ""),
+        member_id=state.get("member_id"),
+        final_answer=extract_final_answer(state),
+        tools_used=extract_tools_used(state),
+    )
 
 
 # =============================================================================
@@ -486,5 +292,84 @@ def compile_react_graph(checkpointer=None):
 # To customize persistence, set POSTGRES_URI environment variable.
 # See: https://langchain-ai.github.io/langgraph/cloud/reference/env_var/#postgres_uri_custom
 
-# Export compiled graph for langgraph.json (no checkpointer - LangGraph API manages it)
-react_healthcare_graph = build_react_graph().compile()
+
+# =============================================================================
+# Graph Export for langgraph dev
+# =============================================================================
+#
+# AGENT MARKERS FOR SPLUNK O11Y AGENT FLOW VISUALIZATION
+# -------------------------------------------------------
+# The "agent" tag triggers invoke_agent span (not workflow) in OTel instrumentation.
+# This changes the trace from:
+#   workflow react_healthcare → step model → chat
+# To:
+#   invoke_agent healthcare_agent → step model → chat
+#
+# Execution logic is UNCHANGED - only trace visualization changes.
+#
+# IMPORTANT: LangGraph dev server REPLACES custom metadata with its own system metadata
+# but PRESERVES tags. Therefore, we pass agent attributes via tags using the format:
+#   - agent_type:<type>
+#   - agent_description:<description>
+#   - agent_tools:<tool1,tool2,...>
+#
+# This ensures the OTel instrumentation can extract gen_ai.agent.* attributes
+# even when running under LangGraph dev server.
+
+# Lazy initialization - don't create at import time (SPCS session not available yet)
+_react_healthcare_graph: CompiledStateGraph | None = None
+
+
+def get_react_healthcare_graph() -> CompiledStateGraph:
+    """Get the pre-configured healthcare agent graph (lazy initialization).
+
+    In SPCS mode, this must be called AFTER main.py sets the session.
+    """
+    global _react_healthcare_graph
+    if _react_healthcare_graph is None:
+        _react_healthcare_graph = compile_react_graph(use_checkpointer=False).with_config(
+            {
+                "run_name": "healthcare_agent",
+                # Tags: Agent markers and attributes (preserved by LangGraph dev server)
+                # Format: "key:value" parsed by OTel instrumentation callback handler
+                "tags": [
+                    "agent",  # Triggers invoke_agent span type
+                    "agent:healthcare_agent",  # Agent name (gen_ai.agent.name)
+                    "agent_type:react",  # Agent type (gen_ai.agent.type)
+                    "agent_description:Healthcare ReAct agent for member inquiries using Snowflake Cortex Analyst and Search",
+                    f"agent_tools:{','.join(t.name for t in HEALTHCARE_TOOLS)}",
+                ],
+                # Metadata: Additional context (may be overwritten by LangGraph dev)
+                "metadata": {
+                    "agent_name": "healthcare_agent",
+                    "agent_type": "react",
+                },
+            }
+        )
+    return _react_healthcare_graph
+
+
+# NOTE: For backward compatibility, expose as module-level variable
+# This will be lazily initialized on first access
+# DEPRECATED: Use get_react_healthcare_graph() instead
+react_healthcare_graph = None  # Set by first call to get_react_healthcare_graph()
+
+
+# For LangGraph dev server compatibility
+def _get_lazy_graph():
+    """Get graph for langgraph dev server."""
+    return get_react_healthcare_graph()
+
+
+# Export the lazy getter for langgraph.json
+__all__ = [
+    "compile_react_graph",
+    "build_healthcare_agent",
+    "build_healthcare_agent_sync",
+    "get_react_healthcare_graph",
+    "react_healthcare_graph",
+    # Helper functions
+    "build_conversation_turn",
+    "extract_final_answer",
+    "extract_tools_used",
+]

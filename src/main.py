@@ -4,6 +4,12 @@ import logging
 import warnings
 from contextlib import asynccontextmanager
 
+# Configure logging FIRST so OTel setup logs are visible
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 # Suppress known warning from third-party langchain-snowflake package
 # This is a harmless Pydantic field shadowing warning in their code
 warnings.filterwarnings(
@@ -12,6 +18,12 @@ warnings.filterwarnings(
     category=UserWarning,
     module="langchain_snowflake",
 )
+
+# Initialize OpenTelemetry BEFORE any LangChain imports
+# This must be done early to instrument all LangChain components
+from src.otel_setup import setup_opentelemetry
+
+setup_opentelemetry()
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,12 +34,6 @@ from src.dependencies import get_compiled_graph
 from src.middleware.logging import RequestLoggingMiddleware
 from src.models.responses import HealthResponse
 from src.routers import agent_routes
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -44,14 +50,17 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     logger.info(f"Database: {settings.snowflake_database}")
 
     # Initialize Snowpark session for Cortex tools AND ChatSnowflake
+    # Uses resilient session wrapper for automatic reconnection on token expiration
     from src.graphs.react_workflow import set_snowpark_session
     from src.services.llm_service import set_session as set_llm_session
+    from src.services.snowflake_session import set_global_session
 
     try:
         snowpark_session = _create_snowpark_session()
         set_snowpark_session(snowpark_session)
         set_llm_session(snowpark_session)  # Share session with ChatSnowflake
-        logger.info("Snowpark session initialized for Cortex tools")
+        set_global_session(snowpark_session)  # Register with resilient wrapper
+        logger.info("Snowpark session initialized for Cortex tools (resilient wrapper enabled)")
     except Exception as e:
         logger.warning(f"Snowpark session init failed (tools will use mocks): {e}")
 
@@ -77,67 +86,29 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
 
 def _create_snowpark_session():
-    """Create Snowpark session based on environment (SPCS vs local)."""
-    import os
-    from pathlib import Path
-
-    from snowflake.snowpark import Session
-
+    """Create Snowpark session based on environment (SPCS vs local).
+    
+    SPCS: Uses token_file_path for automatic token refresh (not static token).
+    Local: Uses key-pair authentication.
+    
+    The token_file_path approach is critical for SPCS - it tells the connector
+    to read the token fresh from the file on each request, picking up the
+    automatically-refreshed token that SPCS maintains at /snowflake/session/token.
+    
+    Reference: https://docs.snowflake.com/en/developer-guide/snowpark-container-services/additional-considerations-services-jobs
+    """
     from src.config import is_running_in_spcs
+    from src.services.snowflake_session import (
+        create_local_snowpark_session,
+        create_spcs_snowpark_session,
+    )
 
     if is_running_in_spcs():
-        # SPCS uses OAuth token authentication
-        token_path = Path("/snowflake/session/token")
-        if not token_path.exists():
-            raise ValueError("SPCS token file not found")
-
-        token = token_path.read_text().strip()
-        host = os.getenv("SNOWFLAKE_HOST", "")
-        if not host:
-            raise ValueError("SNOWFLAKE_HOST not set in SPCS")
-
-        logger.info("Creating Snowpark session with SPCS OAuth token")
-        return Session.builder.configs(
-            {
-                "account": host.replace(".snowflakecomputing.com", ""),
-                "host": host,
-                "authenticator": "oauth",
-                "token": token,
-                "database": settings.snowflake_database,
-                "warehouse": settings.snowflake_warehouse,
-            }
-        ).create()
+        logger.info("Creating Snowpark session for SPCS with token_file_path (auto-refresh enabled)")
+        return create_spcs_snowpark_session()
     else:
-        # Local uses key-pair auth
-        from cryptography.hazmat.backends import default_backend
-        from cryptography.hazmat.primitives import serialization
-
-        if not settings.snowflake_private_key_path:
-            raise ValueError("SNOWFLAKE_PRIVATE_KEY_PATH required for local Snowpark")
-
-        with open(settings.snowflake_private_key_path, "rb") as f:
-            private_key = serialization.load_pem_private_key(
-                f.read(),
-                password=(settings.snowflake_private_key_passphrase.encode() if settings.snowflake_private_key_passphrase else None),
-                backend=default_backend(),
-            )
-
-        private_key_bytes = private_key.private_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-
-        logger.info("Creating Snowpark session with key-pair auth")
-        return Session.builder.configs(
-            {
-                "account": settings.snowflake_account,
-                "user": settings.snowflake_user,
-                "private_key": private_key_bytes,
-                "database": settings.snowflake_database,
-                "warehouse": settings.snowflake_warehouse,
-            }
-        ).create()
+        logger.info("Creating Snowpark session with key-pair auth (local)")
+        return create_local_snowpark_session()
 
 
 app = FastAPI(
@@ -150,6 +121,17 @@ app = FastAPI(
     version="0.2.0",
     lifespan=lifespan,
 )
+
+# Instrument FastAPI for OTel tracing (must be done after app creation)
+# See: https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/fastapi/fastapi.html
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    FastAPIInstrumentor.instrument_app(app)
+    logger.info("FastAPI instrumented for OpenTelemetry")
+except ImportError:
+    logger.debug("FastAPI OTel instrumentation not available")
+except Exception as e:
+    logger.warning(f"FastAPI OTel instrumentation failed: {e}")
 
 # Request logging middleware (must be added before CORS for full coverage)
 app.add_middleware(RequestLoggingMiddleware)
@@ -175,11 +157,44 @@ async def global_exception_handler(request: Request, exc: Exception):  # noqa: A
     )
 
 
-# Health check
+# Health check endpoints
 @app.get("/health", response_model=HealthResponse, tags=["health"])
 async def health() -> HealthResponse:
-    """Health check endpoint for container orchestration."""
+    """Basic health check endpoint for container orchestration.
+    
+    Returns a simple healthy/unhealthy status. For detailed Snowflake
+    connectivity checks, use /health/snowflake instead.
+    """
     return HealthResponse(status="healthy", version="0.2.0")
+
+
+@app.get("/health/snowflake", tags=["health"])
+async def health_snowflake() -> dict:
+    """Detailed Snowflake connectivity health check.
+    
+    Validates:
+    - Token file exists and is readable (SPCS only)
+    - Session can be created with current credentials
+    - Simple query executes successfully
+    
+    This endpoint is useful for diagnosing token expiration issues
+    and verifying the SPCS OAuth token refresh is working.
+    
+    Returns:
+        Detailed health status with individual check results.
+    """
+    from src.services.snowflake_session import check_snowflake_health
+    
+    health_result = await check_snowflake_health()
+    
+    # Add environment info
+    health_result["environment"] = {
+        "database": settings.snowflake_database,
+        "warehouse": settings.snowflake_warehouse,
+        "is_spcs": settings.is_spcs,
+    }
+    
+    return health_result
 
 
 # Include routers

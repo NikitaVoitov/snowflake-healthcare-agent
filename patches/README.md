@@ -1,27 +1,128 @@
-# LangChain-Snowflake Streaming Patches
+# LangChain-Snowflake Patches
 
-These patches fix critical streaming issues in `langchain-snowflake` that prevent token-by-token streaming when tools are bound.
+These patches enable **LangChain v1 / LangGraph v1** compatibility and fix critical issues in `langchain-snowflake` for production use.
 
-## Problem
+## LangChain v1 Compatibility
 
-The official `langchain-snowflake` has these issues:
-1. **Tool deltas dropped**: `_stream_via_rest_api` only extracts `content` field, ignoring `tool_use` deltas
-2. **Fake streaming**: SQL function path generates full response, then splits into ~20 chunks
-3. **No disable option**: Can't explicitly disable streaming for tool compatibility
+**Why patches are needed:**
+- PyPI `langchain-snowflake==0.2.2` pins `langgraph>=0.6.4,<0.7.0` which blocks LangGraph v1
+- Local editable install removes this constraint
+- MCP integration needs updated imports for `langchain>=1.0.0`
+
+**Solution:**
+- Use editable install from `original_langchain_snwoflake_repo/`
+- Apply patches for LangChain v1 API changes
+
+---
+
+## 🐛 Discovered Bugs & Fixes
+
+### Bug #1: Session Validation Causes "Password is empty" Error
+
+**File:** `langchain_snowflake/_connection/base.py`
+
+**Symptom:**
+```
+Error in create Snowflake session: 251006: 251006: Password is empty
+```
+
+**Root Cause:**
+When `SnowflakeConnectionMixin._get_session()` is called, it passes the session to `SnowflakeSessionManager.get_or_create_session()` which runs `SELECT 1` to validate the session. This validation can fail due to:
+1. Async context issues (session created in different async context)
+2. Warehouse not set on the session
+3. Session timeout/expiration edge cases
+
+When validation fails, the session manager tries to create a NEW session using `password=self.password`, which is `None` when using key-pair authentication.
+
+**Fix:** Trust the provided session directly without running validation queries. If a session is explicitly passed, use it as-is.
+
+**Patch File:** `langchain_snowflake_connection_base_patched.py`
+
+---
+
+### Bug #2: JWT Authentication Requires Public Key Fingerprint
+
+**Files:** `langchain_snowflake/retrievers.py`, `langchain_snowflake/tools/analyst.py`
+
+**Symptom:**
+```
+401 JWT token is invalid
+```
+
+**Root Cause:**
+When key-pair credentials (`account`, `user`, `private_key_path`) are passed to `RestApiRequestBuilder.cortex_search_request()` or `cortex_analyst_request()`, the library generates a JWT for authentication. However, Snowflake's JWT format requires the **public key fingerprint** in the `iss` claim:
+
+- **Current (broken):** `"iss": f"{account}.{user}".upper()`
+- **Required:** `"iss": f"{account}.{user}.SHA256:{PUBLIC_KEY_FP}".upper()`
+
+The `langchain-snowflake` library doesn't extract or compute the public key fingerprint from the private key file.
+
+**Fix:** Don't pass key-pair credentials to Cortex Search/Analyst REST API requests. Instead, rely on **session token authentication** (same as `ChatSnowflake` does for `/cortex/inference:complete`).
+
+**Patch Files:** 
+- `langchain_snowflake_retrievers_patched.py` (updated)
+- `langchain_snowflake_analyst_patched.py` (new - inline in original)
+
+---
+
+### Bug #3: Streaming Tool Deltas Dropped
+
+**File:** `langchain_snowflake/chat_models/streaming.py`
+
+**Symptom:** Tool calls are silently dropped when streaming is enabled.
+
+**Root Cause:** The `_stream_via_rest_api` method only extracts the `content` field from stream chunks, ignoring `tool_use` deltas entirely.
+
+**Fix:** Use `ToolCallChunk` to properly yield `tool_use` deltas that LangChain can accumulate.
+
+**Patch File:** `langchain_snowflake_streaming_patched.py`
+
+---
+
+### Bug #4: No Way to Disable Streaming
+
+**File:** `langchain_snowflake/chat_models/base.py`
+
+**Symptom:** Can't reliably use tools with streaming because tool deltas are dropped.
+
+**Fix:** Added `disable_streaming: bool = False` parameter to `ChatSnowflake` to force non-streaming behavior.
+
+**Patch File:** `langchain_snowflake_base_patched.py`
+
+---
 
 ## Patches
 
-### 1. `langchain_snowflake_streaming_patched.py`
-**Fixes:**
-- ✅ Uses `ToolCallChunk` to properly yield tool_use deltas  
-- ✅ LangChain auto-accumulates partial tool calls via `AIMessageChunk.__add__`
-- ✅ Always uses REST API for native streaming (SQL function can't stream)
-- ✅ Respects `disable_streaming` parameter
+### Session & Authentication Patches
 
-### 2. `langchain_snowflake_base_patched.py`
-**Fixes:**
-- ✅ Adds `disable_streaming: bool = False` parameter to ChatSnowflake
-- ✅ Documents the parameter with examples
+| Patch File | Bug Fixed | Description |
+|------------|-----------|-------------|
+| `langchain_snowflake_connection_base_patched.py` | Bug #1 | Trust provided session without validation |
+| `langchain_snowflake_retrievers_patched.py` | Bug #2 | Use session token auth for Cortex Search |
+| (inline in original) | Bug #2 | Use session token auth for Cortex Analyst |
+
+### Streaming & Tool Calling Patches
+
+| Patch File | Bug Fixed | Description |
+|------------|-----------|-------------|
+| `langchain_snowflake_streaming_patched.py` | Bug #3 | Properly yield tool_use deltas |
+| `langchain_snowflake_base_patched.py` | Bug #4 | Add `disable_streaming` parameter |
+
+### OTel Observability Patches
+
+| Patch File | Feature |
+|------------|---------|
+| `langchain_snowflake_tools_patched.py` | Extract `request_id`, `finish_reason` from Cortex API |
+| `langchain_snowflake_utils_patched.py` | Add observability fields to response metadata |
+| `langchain_snowflake_retrievers_patched.py` | Propagate `_snowflake_request_id` to Document metadata |
+
+### LangChain v1 Compatibility Patches
+
+| Patch File | Fix |
+|------------|-----|
+| `langchain_snowflake_mcp_integration_patched.py` | Tool import fix for `langchain>=1.0.0` |
+
+---
 
 ## Installation
 
@@ -37,12 +138,15 @@ The official `langchain-snowflake` has these issues:
 
 | Scenario | Before | After |
 |----------|--------|-------|
+| Session with key-pair auth | ❌ "Password is empty" | ✅ Uses provided session |
+| Cortex Search REST API | ❌ 401 JWT invalid | ✅ Session token auth works |
+| Cortex Analyst REST API | ❌ 401 JWT invalid | ✅ Session token auth works |
 | Text streaming (REST API) | ✅ Works | ✅ Works |
-| Text streaming (SQL function) | ⚠️ Fake (~20 chunks) | ✅ Native via REST API |
 | Tool call start | ❌ Dropped | ✅ `ToolCallChunk(name, id)` yielded |
 | Tool call args | ❌ Dropped | ✅ `ToolCallChunk(args)` streamed |
-| LangChain accumulation | ❌ Broken | ✅ Auto-combines via `__add__` |
 | Final `tool_calls` | ❌ Empty | ✅ Populated when JSON complete |
+
+---
 
 ## Testing
 
@@ -51,63 +155,41 @@ The official `langchain-snowflake` has these issues:
 # 1. Apply patches
 ./patches/apply_patches.sh
 
-# 2. Update llm_service.py to remove disable_streaming=True
-# (or set it to False)
+# 2. Run LangGraph dev server
+.venv/bin/langgraph dev
 
-# 3. Run LangGraph dev server
-uv run langgraph dev
-
-# 4. Test streaming
-curl -X POST http://127.0.0.1:2024/runs/stream \
+# 3. Test agent
+curl -X POST "http://127.0.0.1:2024/threads/{id}/runs/wait" \
   -H "Content-Type: application/json" \
-  -d '{"input": {"query": "What is the weather?"}, ...}'
+  -d '{"assistant_id": "react_healthcare", "input": {...}}'
 ```
 
 ### SPCS Testing
 ```bash
-# 1. Apply patches (they're already in the Docker image)
-# 2. Rebuild and deploy
+# 1. Rebuild Docker image (patches are applied in Dockerfile)
 ./scripts/build_and_deploy.sh
 
-# 3. Test via Streamlit app with streaming enabled
+# 2. Test via Streamlit app
 ```
 
-## Streamlit UI Expectations
-
-With patches applied, you should see:
-```
-🤔 Agent is thinking...
-Let me check the weather for you.     ← TEXT STREAMS TOKEN BY TOKEN!
-🔧 Tool call: get_weather             ← TOOL CALL STARTS
-📝 Building arguments...              ← PARTIAL ARGS STREAMING
-✅ Tool call complete                 ← ARGS COMPLETE
-📊 Tool returned: 72°F sunny          ← TOOL RESULT
-```
+---
 
 ## Files
 
-- `langchain_snowflake_streaming_patched.py` - Patched streaming.py
-- `langchain_snowflake_base_patched.py` - Patched base.py
-- `langchain_snowflake_tools_patched.py` - Patched tools.py (message format + OTel observability)
-- `langchain_snowflake_utils_patched.py` - Patched utils.py (Cortex Inference metadata)
-- `langchain_snowflake_retrievers_patched.py` - Patched retrievers.py (request_id propagation)
-- `langchain_snowflake_mcp_integration_patched.py` - Patched mcp_integration.py (Tool import fix)
+### Session & Auth
+- `langchain_snowflake_connection_base_patched.py` - Patched `_connection/base.py`
+- `langchain_snowflake_retrievers_patched.py` - Patched `retrievers.py`
+
+### Streaming & Tools
+- `langchain_snowflake_streaming_patched.py` - Patched `chat_models/streaming.py`
+- `langchain_snowflake_base_patched.py` - Patched `chat_models/base.py`
+- `langchain_snowflake_tools_patched.py` - Patched `chat_models/tools.py`
+- `langchain_snowflake_utils_patched.py` - Patched `chat_models/utils.py`
+
+### LangChain v1
+- `langchain_snowflake_mcp_integration_patched.py` - Patched `mcp_integration.py`
+
+### Scripts
 - `apply_patches.sh` - Shell script to apply patches
 - `revert_patches.sh` - Shell script to revert patches
 - `README.md` - This file
-
-### OTel Observability Patches
-
-The following files are patched to enable OpenTelemetry observability for Snowflake Cortex:
-
-| File | Observability Feature |
-|------|----------------------|
-| `tools.py` | Extracts `request_id`, `finish_reason`, `guard_tokens` from Cortex Inference API response |
-| `utils.py` | `SnowflakeMetadataFactory.create_response_metadata` accepts new observability fields |
-| `retrievers.py` | Propagates `_snowflake_request_id` to Document metadata |
-
-These patches enable standard OTel GenAI semconv attributes:
-- `gen_ai.response.id` - Request ID from Cortex Inference API
-- `gen_ai.response.finish_reasons` - Array of stop reasons (standard semconv)
-- `snowflake.inference.guard_tokens` - Snowflake-specific: Cortex Guard token usage
-

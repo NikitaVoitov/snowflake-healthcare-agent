@@ -339,19 +339,22 @@ class TestRealCheckpointer:
     @pytest.mark.asyncio
     async def test_graph_with_real_checkpointer(self) -> None:
         """Graph execution with real Snowflake checkpointer."""
-        from src.graphs.react_workflow import build_react_graph
+        from src.graphs.react_workflow import compile_react_graph
         from src.services.checkpointer import create_checkpointer
 
         checkpointer = create_checkpointer()
         if hasattr(checkpointer, "asetup"):
             await checkpointer.asetup()
 
-        graph = build_react_graph().compile(checkpointer=checkpointer)
+        # compile_react_graph now returns a compiled agent from create_agent
+        graph = compile_react_graph(checkpointer=checkpointer)
 
         thread_id = f"real-test-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         config = {"configurable": {"thread_id": thread_id}}
 
         from langchain_core.messages import HumanMessage
+
+        from src.graphs.react_workflow import extract_final_answer
 
         result = await graph.ainvoke(
             {
@@ -368,8 +371,10 @@ class TestRealCheckpointer:
             config=config,
         )
 
-        # Verify execution completed (ReAct should have final_answer)
-        assert result.get("final_answer") is not None
+        # Verify execution completed - extract_final_answer handles create_agent output
+        final_answer = extract_final_answer(result)
+        assert final_answer is not None
+        assert "claims" in final_answer.lower() or "claim" in final_answer.lower()
 
         # Verify checkpoint was saved
         checkpoint = await checkpointer.aget_tuple(config)

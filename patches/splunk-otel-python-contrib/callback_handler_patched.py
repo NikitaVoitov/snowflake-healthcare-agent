@@ -48,6 +48,92 @@ def _serialize(obj: Any) -> str | None:
             return None
 
 
+def _extract_token_usage_from_generations(
+    generations: list[list[Any]] | None,
+) -> tuple[int | None, int | None]:
+    """Extract input/output token counts from LangChain generations.
+
+    Handles both streaming (usage_metadata on message) and non-streaming formats.
+
+    Args:
+        generations: List of generation lists from LLMResult.
+
+    Returns:
+        Tuple of (input_tokens, output_tokens), either may be None.
+    """
+    if not generations:
+        return None, None
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+    for generation_list in generations:
+        for generation in generation_list:
+            if not hasattr(generation, "message"):
+                continue
+            message = generation.message
+            if not hasattr(message, "usage_metadata"):
+                continue
+            usage_meta = getattr(message, "usage_metadata", None)
+            if not isinstance(usage_meta, dict) or not usage_meta:
+                continue
+
+            # Try standard keys first, then fall back to OpenAI-style keys
+            in_val = usage_meta.get("input_tokens") or usage_meta.get("prompt_tokens")
+            out_val = usage_meta.get("output_tokens") or usage_meta.get("completion_tokens")
+
+            if isinstance(in_val, int) and in_val > 0:
+                input_tokens = in_val
+            if isinstance(out_val, int) and out_val > 0:
+                output_tokens = out_val
+
+            # Stop early if we found both values
+            if input_tokens is not None and output_tokens is not None:
+                return input_tokens, output_tokens
+
+        # Stop outer loop early if we found values
+        if input_tokens is not None or output_tokens is not None:
+            break
+
+    return input_tokens, output_tokens
+
+
+def _extract_token_usage_from_llm_output(
+    llm_output: dict[str, Any] | None,
+    existing_input: int | None = None,
+    existing_output: int | None = None,
+) -> tuple[int | None, int | None]:
+    """Extract token usage from llm_output (non-streaming format).
+
+    Args:
+        llm_output: The llm_output dict from LLMResult.
+        existing_input: Already extracted input tokens (won't override if set).
+        existing_output: Already extracted output tokens (won't override if set).
+
+    Returns:
+        Tuple of (input_tokens, output_tokens).
+    """
+    if not llm_output:
+        return existing_input, existing_output
+
+    input_tokens = existing_input
+    output_tokens = existing_output
+
+    usage = llm_output.get("usage") or llm_output.get("token_usage") or {}
+
+    if input_tokens is None:
+        prompt_val = usage.get("prompt_tokens") or usage.get("input_tokens")
+        if isinstance(prompt_val, int):
+            input_tokens = prompt_val
+
+    if output_tokens is None:
+        completion_val = usage.get("completion_tokens") or usage.get("output_tokens")
+        if isinstance(completion_val, int):
+            output_tokens = completion_val
+
+    return input_tokens, output_tokens
+
+
 def _resolve_agent_name(tags: list[str] | None, metadata: dict[str, Any] | None) -> str | None:
     if metadata:
         for key in ("agent_name", "gen_ai.agent.name", "agent"):
@@ -189,7 +275,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
         """Find provider from nearest parent that has one (Agent, Workflow, or Step).
 
         This enables provider inheritance for tools even when no AgentInvocation exists
-        in the hierarchy (e.g., single-workflow patterns).
+        in the hierarchy (e.g., single-workflow patterns like healthcare-agent).
 
         Args:
             run_id: The run_id to start searching from.
@@ -269,6 +355,29 @@ class LangchainCallbackHandler(BaseCallbackHandler):
                 agent.model = _safe_str(metadata["model_name"])
             if metadata.get("system"):
                 agent.system = _safe_str(metadata["system"])
+            # Extract agent description (supports multiple conventions)
+            desc = metadata.get("agent_description") or metadata.get("description") or metadata.get("ls_description")
+            if desc:
+                agent.description = _safe_str(desc)
+            # Extract agent tools (supports multiple conventions)
+            tools = metadata.get("agent_tools") or metadata.get("ls_tools") or metadata.get("tools")
+            if tools and isinstance(tools, list):
+                agent.tools = [_safe_str(t) for t in tools]
+        # Also extract from tags (LangGraph dev server preserves tags but may replace metadata)
+        # Supports tags like: "agent_type:react", "agent_description:...", "agent_tools:tool1,tool2"
+        if attrs and attrs.get("tags"):
+            for tag in attrs["tags"]:
+                if not isinstance(tag, str):
+                    continue
+                if tag.startswith("agent_type:") and len(tag) > 11:
+                    if not agent.agent_type:
+                        agent.agent_type = tag[11:]
+                elif tag.startswith("agent_description:") and len(tag) > 18:
+                    if not agent.description:
+                        agent.description = tag[18:]
+                elif tag.startswith("agent_tools:") and len(tag) > 12:
+                    if not agent.tools:
+                        agent.tools = tag[12:].split(",")
         self._handler.start_agent(agent)
         return agent
 
@@ -338,7 +447,7 @@ class LangchainCallbackHandler(BaseCallbackHandler):
                     if not wf.description:
                         for tag in tags:
                             if isinstance(tag, str) and tag.startswith("description:"):
-                                wf.description = tag[len("description:"):]
+                                wf.description = tag[len("description:") :]
                                 break
                 # Generate description from graph_id if still not set
                 if not wf.description and metadata and metadata.get("graph_id"):
@@ -605,10 +714,18 @@ class LangchainCallbackHandler(BaseCallbackHandler):
                         finish_reason=finish_reason or "stop",
                     )
                 ]
-        llm_output = getattr(response, "llm_output", {}) or {}
-        usage = llm_output.get("usage") or llm_output.get("token_usage") or {}
-        inv.input_tokens = usage.get("prompt_tokens")
-        inv.output_tokens = usage.get("completion_tokens")
+
+        # Extract token usage from multiple sources (streaming vs non-streaming)
+        # Priority: message.usage_metadata (streaming) > llm_output (non-streaming)
+        input_tokens, output_tokens = _extract_token_usage_from_generations(generations)
+
+        # Fallback to llm_output for non-streaming responses
+        if input_tokens is None or output_tokens is None:
+            llm_output = getattr(response, "llm_output", {}) or {}
+            input_tokens, output_tokens = _extract_token_usage_from_llm_output(llm_output, input_tokens, output_tokens)
+
+        inv.input_tokens = input_tokens
+        inv.output_tokens = output_tokens
 
         # Extract response model and metadata from response_metadata
         # Uses standard GenAI semantic conventions where available:
@@ -730,9 +847,12 @@ class LangchainCallbackHandler(BaseCallbackHandler):
             if context_agent_name is not None:
                 tool.agent_name = context_agent_name
             tool.agent_id = str(context_agent.run_id)
+        # Inherit provider from ANY parent context (Agent, Workflow, or Step)
+        # This works for both multi-agent and single-workflow patterns
         inherited_provider = self._find_nearest_provider_context(parent_run_id)
         if inherited_provider:
             tool.provider = inherited_provider
+        # Also check metadata for provider hint (some frameworks pass it there)
         if not tool.provider and metadata:
             provider_hint = metadata.get("ls_provider") or metadata.get("provider")
             if provider_hint:

@@ -7,11 +7,9 @@ Implements async checkpointing using native snowflake.connector with OAuth token
 import asyncio
 import json
 import logging
-import os
 import random
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any, cast
 
 import snowflake.connector
@@ -259,59 +257,26 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
 
     @classmethod
     def _create_spcs_connection(cls) -> snowflake.connector.SnowflakeConnection:
-        """Create connection using SPCS OAuth token."""
-        token_path = Path("/snowflake/session/token")
-        if not token_path.exists():
-            raise ValueError("SPCS token file not found")
-
-        token = token_path.read_text().strip()
-        host = os.getenv("SNOWFLAKE_HOST")
-        if not host:
-            raise ValueError("SNOWFLAKE_HOST not set in SPCS environment")
-
-        logger.info("Creating SPCS connection with OAuth token")
-        return snowflake.connector.connect(
-            account=host.replace(".snowflakecomputing.com", ""),
-            host=host,
-            authenticator="oauth",
-            token=token,
-            database=settings.snowflake_database,
-            warehouse=settings.snowflake_warehouse,
-        )
+        """Create connection using SPCS OAuth token with auto-refresh.
+        
+        Uses token_file_path instead of token so the connector reads fresh tokens
+        automatically from the file that SPCS refreshes every few minutes.
+        This prevents 390114 "Authentication token has expired" errors.
+        
+        Reference: https://docs.snowflake.com/en/developer-guide/snowpark-container-services/additional-considerations-services-jobs
+        """
+        from src.services.snowflake_session import create_spcs_connector_connection
+        
+        logger.info("Creating SPCS connection with token_file_path (auto-refresh enabled)")
+        return create_spcs_connector_connection()
 
     @classmethod
     def _create_local_connection(cls) -> snowflake.connector.SnowflakeConnection:
-        """Create connection using key-pair authentication."""
-        from cryptography.hazmat.backends import default_backend
-        from cryptography.hazmat.primitives import serialization
-
-        key_path = settings.snowflake_private_key_path
-        passphrase = settings.snowflake_private_key_passphrase
-
-        if not key_path:
-            raise ValueError("SNOWFLAKE_PRIVATE_KEY_PATH required for local")
-
-        with open(key_path, "rb") as f:
-            private_key = serialization.load_pem_private_key(
-                f.read(),
-                password=passphrase.encode() if passphrase else None,
-                backend=default_backend(),
-            )
-
-        private_key_bytes = private_key.private_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-
+        """Create connection using key-pair authentication for local development."""
+        from src.services.snowflake_session import create_local_connector_connection
+        
         logger.info("Creating local connection with key-pair auth")
-        return snowflake.connector.connect(
-            account=settings.snowflake_account,
-            user=settings.snowflake_user,
-            private_key=private_key_bytes,
-            database=settings.snowflake_database,
-            warehouse=settings.snowflake_warehouse,
-        )
+        return create_local_connector_connection()
 
     @asynccontextmanager
     async def _cursor(self) -> AsyncIterator[AsyncCursor]:

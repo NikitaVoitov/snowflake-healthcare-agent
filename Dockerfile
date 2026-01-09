@@ -18,45 +18,51 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# METHOD 4: Copy dependency files FIRST for better cache utilization
-COPY pyproject.toml uv.lock ./
+# Create venv and install SPCS production deps directly (avoids langchain-snowflake PyPI conflict)
+RUN uv venv /app/.venv && \
+    uv pip install --python /app/.venv/bin/python \
+        "langgraph>=1.0.0" \
+        "langchain>=1.0.0" \
+        "langchain-core>=0.3.75" \
+        "langgraph-checkpoint-snowflake>=0.1.0" \
+        "snowflake-snowpark-python>=1.14.0" \
+        "snowflake-sqlalchemy>=1.6.0" \
+        "fastapi>=0.115.0" \
+        "uvicorn>=0.32.0" \
+        "aiohttp>=3.9.0" \
+        "PyJWT>=2.8.0" \
+        "cryptography>=43.0.0" \
+        "pydantic>=2.9.0" \
+        "pydantic-settings>=2.6.0" \
+        "opentelemetry-api>=1.20.0" \
+        "opentelemetry-sdk>=1.20.0" \
+        "opentelemetry-exporter-otlp-proto-http>=1.20.0" \
+        "opentelemetry-instrumentation-fastapi>=0.40b0"
 
-# Install ONLY spcs-production group (PEP 735 dependency-group)
-# --only-group ensures we don't pull in uvloop, watchfiles, websockets, etc.
-RUN uv sync --no-dev --only-group spcs-production --no-install-project && \
-    # Strip unnecessary files in same layer (saves ~50MB)
-    find /app/.venv/lib/python3.11/site-packages \( \
-        -type d -name "__pycache__" -o \
-        -type d -name "tests" -o \
-        -type d -name "test" -o \
-        -type d -name "testing" -o \
-        -type d -name "*.dist-info" -o \
-        -type d -name "*.egg-info" \
-    \) -exec rm -rf {} + 2>/dev/null || true && \
-    find /app/.venv/lib/python3.11/site-packages \( \
-        -type f -name "*.pyc" -o \
-        -type f -name "*.pyo" -o \
-        -type f -name "*.pyi" -o \
-        -type f -name "*.md" -o \
-        -type f -name "*.rst" -o \
-        -type f -name "*.txt" -o \
-        -type f -name "LICENSE*" -o \
-        -type f -name "CHANGELOG*" \
-    \) -delete 2>/dev/null || true && \
-    rm -rf /app/.venv/lib/python3.11/site-packages/setuptools* \
-           /app/.venv/lib/python3.11/site-packages/pkg_resources* \
-           /app/.venv/lib/python3.11/site-packages/_distutils_hack* 2>/dev/null || true
+# =============================================================================
+# Install langchain-snowflake from patched SOURCE (not PyPI - has version conflicts)
+# =============================================================================
+COPY original_langchain_snwoflake_repo/langchain-snowflake/libs/snowflake ./langchain-snowflake/
 
-# Apply patches in builder (before copy to runtime)
-COPY patches/langchain_snowflake_rest_client_patched.py \
-    /app/.venv/lib/python3.11/site-packages/langchain_snowflake/_connection/rest_client.py
-COPY patches/langchain_snowflake_tools_patched.py \
-    /app/.venv/lib/python3.11/site-packages/langchain_snowflake/chat_models/tools.py
-# NEW: Streaming patches for token-level streaming with tools
-COPY patches/langchain_snowflake_streaming_patched.py \
-    /app/.venv/lib/python3.11/site-packages/langchain_snowflake/chat_models/streaming.py
-COPY patches/langchain_snowflake_base_patched.py \
-    /app/.venv/lib/python3.11/site-packages/langchain_snowflake/chat_models/base.py
+RUN uv pip install --python /app/.venv/bin/python /app/langchain-snowflake
+
+# =============================================================================
+# Install splunk-otel-python-contrib from SOURCE (not PyPI!)
+# Following official pattern: https://github.com/signalfx/splunk-otel-python-contrib
+# =============================================================================
+COPY splunk-otel-python-contrib/util/ ./splunk-otel/util/
+COPY splunk-otel-python-contrib/instrumentation-genai/ ./splunk-otel/instrumentation-genai/
+
+RUN uv pip install --python /app/.venv/bin/python /app/splunk-otel/util/opentelemetry-util-genai --no-deps && \
+    uv pip install --python /app/.venv/bin/python /app/splunk-otel/instrumentation-genai/opentelemetry-instrumentation-langchain
+
+# =============================================================================
+# Apply ALL patches (langchain-snowflake + splunk-otel-python-contrib)
+# =============================================================================
+COPY patches/ ./patches/
+RUN chmod +x patches/apply_patches.sh patches/splunk-otel-python-contrib/apply_patches.sh && \
+    cd /app && ./patches/apply_patches.sh && \
+    ./patches/splunk-otel-python-contrib/apply_patches.sh /app/.venv
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Google Distroless (METHOD 1: minimal, secure, 53MB base)

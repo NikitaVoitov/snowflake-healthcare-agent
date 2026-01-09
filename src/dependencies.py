@@ -12,7 +12,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.pregel import Pregel
 
 from src.config import Settings, settings
-from src.graphs.react_workflow import compile_react_graph
+from src.graphs.react_workflow import HEALTHCARE_TOOLS, compile_react_graph
 from src.services.checkpointer import create_checkpointer
 from src.services.react_agent_service import AgentService
 
@@ -45,10 +45,36 @@ def get_compiled_graph() -> Pregel:
 
     Returns:
         Compiled ReAct StateGraph (Pregel instance) with checkpointing enabled.
+
+    Note:
+        Agent markers (tags) are critical for OTel trace visualization.
+        The "agent" tag triggers invoke_agent span instead of workflow.
     """
     logger.info("Compiling ReAct healthcare workflow graph")
     checkpointer = get_checkpointer()
-    return compile_react_graph(checkpointer=checkpointer)
+    graph = compile_react_graph(checkpointer=checkpointer)
+
+    # CRITICAL: Apply agent markers for OTel instrumentation
+    # The "agent" tag triggers invoke_agent span (not workflow) in traces
+    # This enables Splunk O11y Agent Flow visualization
+    return graph.with_config(
+        {
+            "run_name": "healthcare_agent",
+            # Tags: Agent markers preserved across all invocations
+            "tags": [
+                "agent",  # Triggers invoke_agent span type
+                "agent:healthcare_agent",  # Agent name (gen_ai.agent.name)
+                "agent_type:react",  # Agent type (gen_ai.agent.type)
+                "agent_description:Healthcare ReAct agent for member inquiries using Snowflake Cortex Analyst and Search",
+                f"agent_tools:{','.join(t.name for t in HEALTHCARE_TOOLS)}",
+            ],
+            # Metadata: Additional context for traces
+            "metadata": {
+                "agent_name": "healthcare_agent",
+                "agent_type": "react",
+            },
+        }
+    )
 
 
 def get_agent_service(

@@ -3,7 +3,7 @@
 -- Phase 7: Deploy FastAPI container to Snowpark Container Services
 -- 
 -- IMPORTANT: This is the WORKING version tested and deployed successfully.
--- Current version: v1.0.84 (Dec 2024) - Token streaming patches, ToolCallChunk support
+-- Current version: v1.0.100 (Jan 2025) - Auto token refresh, LLM streaming, OTel tracing, code quality
 --
 -- Key learnings:
 --   1. CREATE OR REPLACE SERVICE is NOT supported - must DROP then CREATE
@@ -18,6 +18,9 @@
 --  10. Fully async architecture - no blocking calls in event loop
 --  11. Distroless images need CMD as args only (ENTRYPOINT=python3 already set)
 --  12. langchain-snowflake patches required for SPCS OAuth (SNOWFLAKE_HOST)
+--  13. token_file_path enables automatic OAuth token refresh (not static token)
+--  14. ENABLE_LLM_STREAMING=true required for token-level streaming in Streamlit
+--  15. OTel tracing to external collector via HEALTHCARE_EXTERNAL_ACCESS integration
 -- =============================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -47,19 +50,19 @@ DROP SERVICE IF EXISTS STAGING.HEALTHCARE_AGENTS_SERVICE;
 -- -----------------------------------------------------------------------------
 -- Step 4: Create the SPCS Service
 -- -----------------------------------------------------------------------------
--- WORKING version - Token streaming patches + ToolCallChunk support (v1.0.84)
+-- WORKING version - Auto token refresh + LLM streaming + OTel tracing (v1.0.100)
 CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
     IN COMPUTE POOL AGENTS_POOL
     EXTERNAL_ACCESS_INTEGRATIONS = (HEALTHCARE_EXTERNAL_ACCESS)
     MIN_INSTANCES = 1
     MAX_INSTANCES = 3
     AUTO_SUSPEND_SECS = 0
-    COMMENT = 'Healthcare ReAct Agent v1.0.84 - Token streaming patches, ToolCallChunk support'
+    COMMENT = 'Healthcare ReAct Agent v1.0.100 - Auto token refresh, LLM streaming, OTel tracing'
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:1.0.84
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.100
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB
@@ -72,7 +75,14 @@ spec:
         # Enable ReAct workflow (Reasoning + Acting with conversation memory)
         USE_REACT_WORKFLOW: "true"
         # Enable LLM streaming (requires langchain-snowflake patches)
+        # This enables token-by-token streaming in Streamlit UI
         ENABLE_LLM_STREAMING: "true"
+        # OpenTelemetry configuration for Splunk Observability
+        OTEL_TRACES_EXPORTER: "otlp"
+        OTEL_METRICS_EXPORTER: "otlp"
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol.israelcentral.cloudapp.azure.com:4317"
+        OTEL_SERVICE_NAME: "healthcare-agent-spcs"
+        OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=spcs,service.version=1.0.100"
       resources:
         requests:
           memory: 2Gi
@@ -146,11 +156,11 @@ GRANT USAGE ON FUNCTION STAGING.HEALTHCARE_AGENT_QUERY(VARCHAR, VARCHAR, VARCHAR
 -- -----------------------------------------------------------------------------
 /*
 # VERSION: Update this for each deployment
-export VERSION=1.0.84
+export VERSION=v1.0.100
 export REGISTRY=cisco-splunkincubation.registry.snowflakecomputing.com
 
-# 1. Build for linux/amd64 (required for SPCS)
-docker buildx build --platform linux/amd64 -t healthcare-agent:$VERSION .
+# 1. Build for linux/amd64 (required for SPCS) - use --no-cache for code changes
+docker build --no-cache --platform linux/amd64 -t healthcare-agent:$VERSION .
 
 # 2. Login to Snowflake registry (requires jwt connection profile)
 cd /Users/nvoitov/Documents/Splunk/Snowflake/healthcare
@@ -165,6 +175,42 @@ docker tag healthcare-agent:$VERSION \
 # 4. Push to registry
 docker push \
   $REGISTRY/healthcare_db/staging/healthcare_images/healthcare-agent:$VERSION
+
+# 5. Update service (ALTER instead of DROP/CREATE for faster deployment)
+snow sql -c jwt -q "ALTER SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE FROM SPECIFICATION \$\$
+spec:
+  containers:
+    - name: healthcare-agent
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:$VERSION
+      env:
+        SNOWFLAKE_DATABASE: HEALTHCARE_DB
+        SNOWFLAKE_WAREHOUSE: PAYERS_CC_WH
+        MAX_AGENT_STEPS: \"5\"
+        AGENT_TIMEOUT_SECONDS: \"60\"
+        CORTEX_LLM_MODEL: \"claude-3-5-sonnet\"
+        USE_REACT_WORKFLOW: \"true\"
+        ENABLE_LLM_STREAMING: \"true\"
+        OTEL_TRACES_EXPORTER: \"otlp\"
+        OTEL_METRICS_EXPORTER: \"otlp\"
+        OTEL_EXPORTER_OTLP_ENDPOINT: \"http://otelcol.israelcentral.cloudapp.azure.com:4317\"
+        OTEL_SERVICE_NAME: \"healthcare-agent-spcs\"
+        OTEL_RESOURCE_ATTRIBUTES: \"deployment.environment=spcs,service.version=${VERSION}\"
+      resources:
+        requests:
+          memory: 2Gi
+          cpu: 1
+        limits:
+          memory: 4Gi
+          cpu: 2
+  endpoints:
+    - name: query-api
+      port: 8000
+      public: false
+\$\$;"
+
+# 6. Wait and verify
+sleep 45
+snow sql -c jwt -q "CALL SYSTEM\$GET_SERVICE_STATUS('STAGING.HEALTHCARE_AGENTS_SERVICE');"
 */
 
 -- -----------------------------------------------------------------------------

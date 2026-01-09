@@ -6,6 +6,10 @@ tool execution. Each tool is an async function that returns a string result.
 Tools:
 - query_member_data: Query Snowflake database via Cortex Analyst
 - search_knowledge: Search FAQs, policies, and call transcripts via Cortex Search
+
+Session Management:
+- Tools use the centralized session from llm_service.py
+- Session is initialized once and shared across all components (LLM + tools)
 """
 
 from __future__ import annotations
@@ -15,25 +19,22 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+# Import centralized session management from llm_service
+from src.services.llm_service import get_session, set_session
+
 logger = logging.getLogger(__name__)
 
-# Module-level session for SPCS OAuth token auth
-_snowpark_session = None
 
-
+# Backward compatibility aliases - delegate to llm_service
 def set_snowpark_session(session) -> None:
-    """Set the Snowpark session for tool execution.
-
-    Called during app startup with the OAuth-authenticated session.
-    """
-    global _snowpark_session
-    _snowpark_session = session
-    logger.info("Snowpark session set for healthcare tools")
+    """Set the Snowpark session (delegates to llm_service.set_session)."""
+    set_session(session)
+    logger.info("Snowpark session set for healthcare tools (via llm_service)")
 
 
 def get_snowpark_session():
-    """Get the current Snowpark session."""
-    return _snowpark_session
+    """Get the current Snowpark session (delegates to llm_service.get_session)."""
+    return get_session()
 
 
 # =============================================================================

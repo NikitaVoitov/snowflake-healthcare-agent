@@ -31,5 +31,14 @@ class HealthResponse(BaseSchema):
     """Health check response."""
 
     status: str = Field(default="healthy", description="Service health status")
-    version: str = Field(default="0.1.0", description="API version")
+    version: str = Field(default="0.2.0", description="API version")
+
+
+class SnowflakeHealthResponse(BaseSchema):
+    """Detailed Snowflake connectivity health check response."""
+
+    status: str = Field(..., description="Overall health status: healthy | unhealthy")
+    is_spcs: bool = Field(..., description="Whether running in SPCS environment")
+    checks: dict = Field(default_factory=dict, description="Individual check results")
+    environment: dict | None = Field(None, description="Environment configuration")
 

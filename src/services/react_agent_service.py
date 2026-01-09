@@ -1,7 +1,10 @@
-"""ReAct Agent service for orchestrating LangGraph ReAct workflow execution.
+"""Healthcare Agent service for orchestrating LangGraph agent execution.
 
 Supports conversation continuity via Snowflake checkpointer in SPCS deployments.
-Uses message-based state with ToolNode for automatic tool execution.
+Works with LangChain v1's create_agent which provides:
+- LLM-controlled decision loop (true agent, not workflow)
+- Automatic tool execution via built-in ToolNode
+- Message-based state (HumanMessage, AIMessage, ToolMessage)
 """
 
 import logging
@@ -10,10 +13,11 @@ from datetime import UTC, datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.pregel import Pregel
+from langgraph.graph.state import CompiledStateGraph
 
 from src.config import Settings
 from src.graphs.react_state import HealthcareAgentState
+from src.graphs.react_workflow import extract_final_answer
 from src.models.requests import QueryRequest
 from src.models.responses import AgentResponse, StreamEvent
 
@@ -21,18 +25,20 @@ logger = logging.getLogger(__name__)
 
 
 class AgentService:
-    """Orchestrates LangGraph ReAct healthcare agent execution.
+    """Orchestrates healthcare agent execution using LangChain v1 create_agent.
 
-    Uses modern message-based state pattern with ToolNode.
+    Works with the compiled agent graph from create_agent() which provides
+    an LLM-controlled decision loop with automatic tool execution.
+
     Provides execute() for synchronous completion and stream()
     for real-time event streaming to clients.
     """
 
-    def __init__(self, graph: Pregel, settings: Settings) -> None:
+    def __init__(self, graph: CompiledStateGraph, settings: Settings) -> None:
         """Initialize agent service.
 
         Args:
-            graph: Compiled LangGraph workflow (Pregel instance).
+            graph: Compiled agent graph from create_agent().
             settings: Application settings.
         """
         self.graph = graph
@@ -174,7 +180,8 @@ class AgentService:
 
         # Extract results from message-based state
         messages = result.get("messages", [])
-        final_answer = result.get("final_answer", "")
+        # Use extract_final_answer to find answer from messages (create_agent doesn't set final_answer field)
+        final_answer = extract_final_answer(result)
 
         # Analyze tools used from messages
         tools_used = self._extract_tools_from_messages(messages)

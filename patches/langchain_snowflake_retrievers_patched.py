@@ -1,6 +1,12 @@
 """Snowflake retrievers using Cortex Search.
 
-PATCHED: Added _snowflake_request_id propagation to Document metadata for OTel tracing.
+PATCHED: 
+1. Added _snowflake_request_id propagation to Document metadata for OTel tracing.
+2. Use session token auth instead of JWT for REST API calls (fixes "401 JWT token is invalid")
+
+To apply this patch:
+    cp patches/langchain_snowflake_retrievers_patched.py \
+       original_langchain_snwoflake_repo/langchain-snowflake/libs/snowflake/langchain_snowflake/retrievers.py
 """
 
 import logging
@@ -252,6 +258,9 @@ class SnowflakeCortexSearchRetriever(BaseRetriever, SnowflakeConnectionMixin):
 
         try:
             # Build request using unified client
+            # PATCH: We do NOT pass key-pair credentials here - relying on session token auth
+            # (same as ChatSnowflake does for /cortex/inference:complete endpoint)
+            # JWT auth requires public key fingerprint which we don't have access to
             request_config = RestApiRequestBuilder.cortex_search_request(
                 session=session,
                 database=database,
@@ -281,6 +290,9 @@ class SnowflakeCortexSearchRetriever(BaseRetriever, SnowflakeConnectionMixin):
 
         try:
             # Build request using unified client
+            # PATCH: We do NOT pass key-pair credentials here - relying on session token auth
+            # (same as ChatSnowflake does for /cortex/inference:complete endpoint)
+            # JWT auth requires public key fingerprint which we don't have access to
             request_config = RestApiRequestBuilder.cortex_search_request(
                 session=session,
                 database=database,
@@ -388,4 +400,3 @@ class SnowflakeCortexSearchRetriever(BaseRetriever, SnowflakeConnectionMixin):
                 logger_instance=logger,
             )
             return []
-

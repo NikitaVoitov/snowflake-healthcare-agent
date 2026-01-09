@@ -18,7 +18,9 @@ from contextvars import Token
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Type, Union
+from typing import Any, Literal, Union
+
+# Note: Using modern dict/list type hints instead of Dict/List from typing
 from uuid import UUID, uuid4
 
 from opentelemetry.semconv._incubating.attributes import (
@@ -66,45 +68,45 @@ def _new_str_any_dict() -> dict[str, Any]:
 class GenAI:
     """Base type for all GenAI telemetry entities."""
 
-    context_token: Optional[ContextToken] = None
-    span: Optional[Span] = None
-    span_context: Optional[SpanContext] = None
+    context_token: ContextToken | None = None
+    span: Span | None = None
+    span_context: SpanContext | None = None
     # Parent span for proper parent-child trace linking
-    parent_span: Optional[Span] = None
-    trace_id: Optional[int] = None
-    span_id: Optional[int] = None
-    trace_flags: Optional[int] = None
+    parent_span: Span | None = None
+    trace_id: int | None = None
+    span_id: int | None = None
+    trace_flags: int | None = None
     start_time: float = field(default_factory=time.time)
-    end_time: Optional[float] = None
-    provider: Optional[str] = field(
+    end_time: float | None = None
+    provider: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_PROVIDER_NAME},
     )
-    framework: Optional[str] = None
-    attributes: Dict[str, Any] = field(default_factory=_new_str_any_dict)
+    framework: str | None = None
+    attributes: dict[str, Any] = field(default_factory=_new_str_any_dict)
     run_id: UUID = field(default_factory=uuid4)
-    parent_run_id: Optional[UUID] = None
-    agent_name: Optional[str] = field(
+    parent_run_id: UUID | None = None
+    agent_name: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_AGENT_NAME},
     )
-    agent_id: Optional[str] = field(
+    agent_id: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_AGENT_ID},
     )
-    system: Optional[str] = field(
+    system: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_SYSTEM},
     )
-    conversation_id: Optional[str] = field(
+    conversation_id: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_CONVERSATION_ID},
     )
-    data_source_id: Optional[str] = field(
+    data_source_id: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_DATA_SOURCE_ID},
     )
-    sample_for_evaluation: Optional[bool] = field(default=True)
+    sample_for_evaluation: bool | None = field(default=True)
 
     def semantic_convention_attributes(self) -> dict[str, Any]:
         """Return semantic convention attributes defined on this dataclass."""
@@ -129,20 +131,18 @@ class ToolCall(GenAI):
 
     arguments: Any
     name: str
-    id: Optional[str]
+    id: str | None
     type: Literal["tool_call"] = "tool_call"
 
 
 @dataclass()
 class ToolCallResponse:
     response: Any
-    id: Optional[str]
+    id: str | None
     type: Literal["tool_call_response"] = "tool_call_response"
 
 
-FinishReason = Literal[
-    "content_filter", "error", "length", "stop", "tool_calls"
-]
+FinishReason = Literal["content_filter", "error", "length", "stop", "tool_calls"]
 
 
 @dataclass()
@@ -164,7 +164,7 @@ class InputMessage:
 class OutputMessage:
     role: str
     parts: list[MessagePart]
-    finish_reason: Union[str, FinishReason]
+    finish_reason: str | FinishReason
 
 
 @dataclass
@@ -176,114 +176,102 @@ class LLMInvocation(GenAI):
     util-only helpers or inputs to alternative span flavors (e.g. Traceloop).
     """
 
-    request_model: str = field(
-        metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_MODEL}
-    )
-    server_address: Optional[str] = field(
+    request_model: str = field(metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_MODEL})
+    server_address: str | None = field(
         default=None,
         metadata={"semconv": ServerAttributes.SERVER_ADDRESS},
     )
-    server_port: Optional[int] = field(
+    server_port: int | None = field(
         default=None,
         metadata={"semconv": ServerAttributes.SERVER_PORT},
     )
-    input_messages: List[InputMessage] = field(
-        default_factory=_new_input_messages
-    )
+    input_messages: list[InputMessage] = field(default_factory=_new_input_messages)
     # Traceloop compatibility relies on enumerating these lists into prefixed attributes.
-    output_messages: List[OutputMessage] = field(
-        default_factory=_new_output_messages
-    )
+    output_messages: list[OutputMessage] = field(default_factory=_new_output_messages)
     operation: str = field(
         default=GenAIAttributes.GenAiOperationNameValues.CHAT.value,
         metadata={"semconv": GenAIAttributes.GEN_AI_OPERATION_NAME},
     )
-    response_model_name: Optional[str] = field(
+    response_model_name: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_RESPONSE_MODEL},
     )
-    response_id: Optional[str] = field(
+    response_id: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_RESPONSE_ID},
     )
-    input_tokens: Optional[AttributeValue] = field(
+    input_tokens: AttributeValue | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS},
     )
-    output_tokens: Optional[AttributeValue] = field(
+    output_tokens: AttributeValue | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS},
     )
     # Structured function/tool definitions for semantic convention emission
     request_functions: list[dict[str, Any]] = field(default_factory=list)
-    request_temperature: Optional[float] = field(
+    request_temperature: float | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_TEMPERATURE},
     )
-    request_top_p: Optional[float] = field(
+    request_top_p: float | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_TOP_P},
     )
-    request_top_k: Optional[int] = field(
+    request_top_k: int | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_TOP_K},
     )
-    request_frequency_penalty: Optional[float] = field(
+    request_frequency_penalty: float | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_FREQUENCY_PENALTY},
     )
-    request_presence_penalty: Optional[float] = field(
+    request_presence_penalty: float | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_PRESENCE_PENALTY},
     )
-    request_stop_sequences: List[str] = field(
+    request_stop_sequences: list[str] = field(
         default_factory=list,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_STOP_SEQUENCES},
     )
-    request_max_tokens: Optional[int] = field(
+    request_max_tokens: int | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_MAX_TOKENS},
     )
-    request_choice_count: Optional[int] = field(
+    request_choice_count: int | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_CHOICE_COUNT},
     )
-    request_seed: Optional[int] = field(
+    request_seed: int | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_SEED},
     )
-    request_encoding_formats: List[str] = field(
+    request_encoding_formats: list[str] = field(
         default_factory=list,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_ENCODING_FORMATS},
     )
-    output_type: Optional[str] = field(
+    output_type: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_OUTPUT_TYPE},
     )
-    response_finish_reasons: List[str] = field(
+    response_finish_reasons: list[str] = field(
         default_factory=list,
         metadata={"semconv": GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS},
     )
-    request_service_tier: Optional[str] = field(
+    request_service_tier: str | None = field(
         default=None,
-        metadata={
-            "semconv": GenAIAttributes.GEN_AI_OPENAI_REQUEST_SERVICE_TIER
-        },
+        metadata={"semconv": GenAIAttributes.GEN_AI_OPENAI_REQUEST_SERVICE_TIER},
     )
-    response_service_tier: Optional[str] = field(
+    response_service_tier: str | None = field(
         default=None,
-        metadata={
-            "semconv": GenAIAttributes.GEN_AI_OPENAI_RESPONSE_SERVICE_TIER
-        },
+        metadata={"semconv": GenAIAttributes.GEN_AI_OPENAI_RESPONSE_SERVICE_TIER},
     )
-    response_system_fingerprint: Optional[str] = field(
+    response_system_fingerprint: str | None = field(
         default=None,
-        metadata={
-            "semconv": GenAIAttributes.GEN_AI_OPENAI_RESPONSE_SYSTEM_FINGERPRINT
-        },
+        metadata={"semconv": GenAIAttributes.GEN_AI_OPENAI_RESPONSE_SYSTEM_FINGERPRINT},
     )
     # Security inspection attribute (Cisco AI Defense)
-    security_event_id: Optional[str] = field(
+    security_event_id: str | None = field(
         default=None,
         metadata={"semconv": GEN_AI_SECURITY_EVENT_ID},
     )
@@ -292,7 +280,7 @@ class LLMInvocation(GenAI):
 @dataclass
 class Error:
     message: str
-    type: Type[BaseException]
+    type: type[BaseException]
 
 
 @dataclass
@@ -304,11 +292,11 @@ class EvaluationResult:
     """
 
     metric_name: str
-    score: Optional[float] = None
-    label: Optional[str] = None
-    explanation: Optional[str] = None
-    error: Optional[Error] = None
-    attributes: Dict[str, Any] = field(default_factory=dict)
+    score: float | None = None
+    label: str | None = None
+    explanation: str | None = None
+    error: Error | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -324,10 +312,10 @@ class EmbeddingInvocation(GenAI):
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_MODEL},
     )
     input_texts: list[str] = field(default_factory=list)
-    dimension_count: Optional[int] = None
-    server_port: Optional[int] = None
-    server_address: Optional[str] = None
-    input_tokens: Optional[int] = field(
+    dimension_count: int | None = None
+    server_port: int | None = None
+    server_address: str | None = None
+    input_tokens: int | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS},
     )
@@ -335,7 +323,7 @@ class EmbeddingInvocation(GenAI):
         default_factory=list,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_ENCODING_FORMATS},
     )
-    error_type: Optional[str] = None
+    error_type: str | None = None
 
 
 @dataclass
@@ -363,10 +351,10 @@ class Workflow(GenAI):
     """
 
     name: str
-    workflow_type: Optional[str] = None  # sequential, parallel, graph, dynamic
-    description: Optional[str] = None
-    initial_input: Optional[str] = None  # User's initial query/request
-    final_output: Optional[str] = None  # Final response/result
+    workflow_type: str | None = None  # sequential, parallel, graph, dynamic
+    description: str | None = None
+    initial_input: str | None = None  # User's initial query/request
+    final_output: str | None = None  # Final response/result
 
 
 @dataclass
@@ -374,19 +362,17 @@ class _BaseAgent(GenAI):
     """Shared fields for agent lifecycle phases."""
 
     name: str
-    agent_type: Optional[str] = (
-        None  # researcher, planner, executor, critic, etc.
-    )
-    description: Optional[str] = field(
+    agent_type: str | None = None  # researcher, planner, executor, critic, etc.
+    description: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_AGENT_DESCRIPTION},
     )
-    model: Optional[str] = field(
+    model: str | None = field(
         default=None,
         metadata={"semconv": GenAIAttributes.GEN_AI_REQUEST_MODEL},
     )  # primary model if applicable
     tools: list[str] = field(default_factory=list)  # available tool names
-    system_instructions: Optional[str] = None  # System prompt/instructions
+    system_instructions: str | None = None  # System prompt/instructions
 
 
 @dataclass
@@ -398,7 +384,7 @@ class AgentCreation(_BaseAgent):
         default="create_agent",
         metadata={"semconv": GenAIAttributes.GEN_AI_OPERATION_NAME},
     )
-    input_context: Optional[str] = None  # optional initial context
+    input_context: str | None = None  # optional initial context
 
 
 @dataclass
@@ -410,8 +396,8 @@ class AgentInvocation(_BaseAgent):
         default="invoke_agent",
         metadata={"semconv": GenAIAttributes.GEN_AI_OPERATION_NAME},
     )
-    input_context: Optional[str] = None  # Input for invoke operations
-    output_result: Optional[str] = None  # Output for invoke operations
+    input_context: str | None = None  # Input for invoke operations
+    output_result: str | None = None  # Output for invoke operations
 
 
 @dataclass
@@ -424,34 +410,35 @@ class Step(GenAI):
     """
 
     name: str
-    objective: Optional[str] = None  # what the step aims to achieve
-    step_type: Optional[str] = (
-        None  # planning, execution, reflection, tool_use, etc.
-    )
-    source: Optional[Literal["workflow", "agent"]] = (
-        None  # where step originated
-    )
-    assigned_agent: Optional[str] = None  # for workflow-assigned steps
-    status: Optional[str] = None  # pending, in_progress, completed, failed
-    description: Optional[str] = None
-    input_data: Optional[str] = None  # Input data/context for the step
-    output_data: Optional[str] = None  # Output data/result from the step
+    objective: str | None = None  # what the step aims to achieve
+    step_type: str | None = None  # planning, execution, reflection, tool_use, etc.
+    source: Literal["workflow", "agent"] | None = None  # where step originated
+    assigned_agent: str | None = None  # for workflow-assigned steps
+    status: str | None = None  # pending, in_progress, completed, failed
+    description: str | None = None
+    input_data: str | None = None  # Input data/context for the step
+    output_data: str | None = None  # Output data/result from the step
 
 
 __all__ = [
-    # existing exports intentionally implicit before; making explicit for new additions
+    # Type aliases
+    "ContextToken",
+    "FinishReason",
+    "MessagePart",
+    # Enums
     "ContentCapturingMode",
-    "ToolCall",
-    "ToolCallResponse",
+    # Data types
     "Text",
     "InputMessage",
     "OutputMessage",
+    "ToolCall",
+    "ToolCallResponse",
     "GenAI",
     "LLMInvocation",
     "EmbeddingInvocation",
     "Error",
     "EvaluationResult",
-    # agentic AI types
+    # Agentic AI types
     "Workflow",
     "AgentCreation",
     "AgentInvocation",
