@@ -133,19 +133,29 @@ def build_healthcare_agent_sync(
 
     # Check if we're in SPCS mode
     if settings.is_spcs:
-        # In SPCS, session is set by main.py during startup
-        session = get_cached_session()
-        if session is None:
-            raise ValueError("No Snowpark session available in SPCS mode. Ensure main.py calls llm_service.set_session() during startup.")
+        # CRITICAL FIX: Read fresh token from file, NOT use cached session
+        # SPCS refreshes /snowflake/session/token automatically, but if we
+        # use a cached session, it holds the OLD token and fails after ~1 hour
+        import os
+        from src.services.snowflake_session import read_spcs_token
         
-        # SPCS: Session-only auth (no key-pair credentials)
+        token = read_spcs_token()
+        host = os.getenv("SNOWFLAKE_HOST")
+        if not host:
+            raise ValueError("SNOWFLAKE_HOST not set in SPCS environment")
+        account = host.replace(".snowflakecomputing.com", "")
+        
+        # SPCS: Use fresh token directly, NOT session
+        # The patched auth.py adds authenticator='oauth' and host automatically
+        # when token is provided, so no user parameter is needed
         llm = ChatSnowflake(
             model=settings.cortex_llm_model,
             temperature=0,
             disable_streaming=not ENABLE_LLM_STREAMING,
-            session=session,
+            token=token,
+            account=account,
         )
-        logger.info("ChatSnowflake created for SPCS (session-only auth)")
+        logger.info("ChatSnowflake created for SPCS (fresh token from file)")
     else:
         # Local: Initialize session with key-pair credentials
         session = init_session_sync()

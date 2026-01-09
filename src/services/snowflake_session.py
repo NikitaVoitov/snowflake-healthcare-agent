@@ -34,6 +34,33 @@ logger = logging.getLogger(__name__)
 # SPCS OAuth token path - refreshed automatically by SPCS every few minutes
 SPCS_TOKEN_PATH = "/snowflake/session/token"
 
+
+def read_spcs_token() -> str:
+    """Read the current OAuth token from SPCS token file.
+    
+    CRITICAL: This reads the token fresh from disk each time.
+    SPCS refreshes this file automatically every few minutes.
+    
+    Use this when creating ChatSnowflake instances to ensure
+    the latest token is always used, avoiding 390114 expiration errors.
+    
+    Returns:
+        Current OAuth token string.
+        
+    Raises:
+        FileNotFoundError: If token file doesn't exist.
+        ValueError: If token file is empty.
+    """
+    token_path = Path(SPCS_TOKEN_PATH)
+    if not token_path.exists():
+        raise FileNotFoundError(f"SPCS token file not found: {SPCS_TOKEN_PATH}")
+    
+    token = token_path.read_text().strip()
+    if not token:
+        raise ValueError(f"SPCS token file is empty: {SPCS_TOKEN_PATH}")
+    
+    return token
+
 # Token expiration error codes
 TOKEN_EXPIRED_ERRORS = {
     "390114",  # Authentication token has expired

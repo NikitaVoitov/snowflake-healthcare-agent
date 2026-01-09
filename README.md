@@ -236,7 +236,8 @@ healthcare/
 │   │   ├── langchain_snowflake_base_patched.py      # disable_streaming parameter
 │   │   ├── langchain_snowflake_tools_patched.py     # Message format + tool name + inference metadata
 │   │   ├── langchain_snowflake_utils_patched.py     # Response metadata for OTel attributes
-│   │   └── langchain_snowflake_rest_client_patched.py # SNOWFLAKE_HOST fix
+│   │   ├── langchain_snowflake_rest_client_patched.py # SNOWFLAKE_HOST fix
+│   │   └── langchain_snowflake_auth_patched.py      # OAuth token authenticator fix for SPCS
 │   │
 │   └── splunk-otel-python-contrib/                  # OpenTelemetry instrumentation patches
 │       ├── callback_handler_patched.py              # Parent span linking, model extraction, Cortex Inference
@@ -598,17 +599,18 @@ snow sql -c <your_connection_name> --filename scripts/sql/08_spcs_deploy.sql
 
 > **langchain-snowflake Patches (applied in Dockerfile):**
 > 
-> We discovered and fixed **3 critical bugs** in `langchain-snowflake` that break multi-turn conversations with tools:
+> We discovered and fixed **4 critical bugs** in `langchain-snowflake` that break SPCS deployment and multi-turn conversations:
 > 
 > | Patch | Bug Fixed | Impact |
 > |-------|-----------|--------|
+> | `auth_patched.py` | Missing `authenticator='oauth'` for token auth | Session creation fails in SPCS (error 251005) |
 > | `streaming_patched.py` | Tool call deltas silently dropped | Streaming fails with tools |
 > | `tools_patched.py` | Text in `content_list` instead of top-level `content` | 400 errors on turn 3+ |
 > | `tools_patched.py` | Tool name defaults to "unknown" | Debugging difficulty |
 > | `base_patched.py` | No `disable_streaming` parameter | Can't control streaming |
 > | `rest_client.py` | `SNOWFLAKE_HOST` not used in SPCS | OAuth auth failures |
 > 
-> See `langchain_snowflake_*_bug.md` files for detailed bug reports.
+> See `langchain_snowflake_*_bug.md` files for detailed bug reports (GitHub Issues [#39](https://github.com/langchain-ai/langchain-snowflake/issues/39)).
 
 ### Test SPCS Service
 

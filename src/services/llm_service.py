@@ -7,7 +7,11 @@ Both environments use langchain-snowflake ChatSnowflake, but with patched versio
 1. rest_client.py: Uses SNOWFLAKE_HOST env var (required for SPCS OAuth)
 2. tools.py: Extracts text from content_list to avoid duplication (issue #35)
 
-SPCS MODE: Session-only auth triggers correct 'Snowflake Token="{token}"' format.
+SPCS MODE: 
+- CRITICAL: Reads fresh token from /snowflake/session/token on EACH ChatSnowflake call
+- This ensures OAuth token auto-refresh works correctly
+- DO NOT cache the session/token - always read fresh to avoid 390114 expiration errors
+
 LOCAL MODE: Key pair auth with private_key_path for REST API tool calling.
 
 STREAMING:
@@ -144,11 +148,14 @@ def _get_session_info(session: Session) -> tuple[str | None, str | None]:
 
 
 async def _create_spcs_chat_model(model: str, temperature: float) -> ChatSnowflake:
-    """Create ChatSnowflake for SPCS environment using session-only auth.
+    """Create ChatSnowflake for SPCS with FRESH token from file.
 
-    IMPORTANT: Pass ONLY session, no explicit auth params.
-    This triggers Method 3 in auth_utils.py which uses correct format:
-    'Snowflake Token="{rest.token}"' (not Bearer)
+    CRITICAL FIX: We read the OAuth token fresh from /snowflake/session/token
+    on EVERY call. This ensures we always use the latest token that SPCS
+    automatically refreshes every few minutes.
+    
+    Previously, we passed a cached session which held an old token, causing
+    390114 "Authentication token has expired" errors after ~1 hour of inactivity.
 
     The patched rest_client.py ensures SNOWFLAKE_HOST is used for the URL.
 
@@ -157,29 +164,39 @@ async def _create_spcs_chat_model(model: str, temperature: float) -> ChatSnowfla
         temperature: Model temperature.
 
     Returns:
-        ChatSnowflake configured for SPCS.
+        ChatSnowflake configured for SPCS with fresh token.
 
     Raises:
-        ValueError: If no session is available.
+        ValueError: If SPCS environment is not properly configured.
     """
-    session = _cached_session
-    if session is None:
-        raise ValueError("No Snowpark session available in SPCS mode. Ensure main.py calls llm_service.set_session() during startup.")
-
-    account, user = _get_session_info(session)
+    from src.services.snowflake_session import read_spcs_token
+    
+    # Read fresh token from file (SPCS refreshes this automatically)
+    # This is the KEY FIX - always read fresh, never use cached token
+    token = read_spcs_token()
+    
+    # Get host and account from environment
+    host = os.getenv("SNOWFLAKE_HOST")
+    if not host:
+        raise ValueError("SNOWFLAKE_HOST not set in SPCS environment")
+    
+    account = host.replace(".snowflakecomputing.com", "")
+    
     logger.info(
-        "Creating ChatSnowflake for SPCS: account=%s, user=%s, model=%s",
+        "Creating ChatSnowflake for SPCS with fresh token: account=%s, model=%s",
         account,
-        user,
         model,
     )
 
-    # Session-only auth: DO NOT pass token, account, user, private_key_path
-    # This triggers the correct 'Snowflake Token="{token}"' format in auth_utils.py
+    # Pass fresh token directly - NOT a cached session
+    # This ensures each LLM call uses the current (auto-refreshed) token
+    # The patched auth.py adds authenticator='oauth' and host automatically
     return ChatSnowflake(
-        session=session,
         model=model,
         temperature=temperature,
+        # Fresh token from SPCS-managed file
+        token=token,
+        account=account,
         # Disable streaming by default to avoid "No generations found in stream" error
         # Set ENABLE_LLM_STREAMING=true after applying langchain-snowflake patches
         disable_streaming=not ENABLE_LLM_STREAMING,

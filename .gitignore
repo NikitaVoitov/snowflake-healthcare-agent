@@ -147,4 +147,6 @@ unknown_model_traces/
 no_tools_attrs_trace/
 /splunk-otel-python-contrib
 /traces_cortex_analyst
-snowflake_connector_python_instrumentation_plan.mdoriginal_splunk-otel-python-contrib/
+snowflake_connector_python_instrumentation_plan.md
+original_splunk-otel-python-contrib/
+original_langchain_snwoflake_repo/

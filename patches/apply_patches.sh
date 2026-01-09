@@ -97,6 +97,14 @@ if [ -d "$CONNECTION_DIR" ]; then
     fi
 fi
 
+# chat_models/auth.py (for OAuth token authentication fix)
+if [ ! -f "$LANGCHAIN_SNOWFLAKE_DIR/auth.py.original" ]; then
+    if [ -f "$LANGCHAIN_SNOWFLAKE_DIR/auth.py" ]; then
+        echo "💾 Backing up original auth.py..."
+        cp "$LANGCHAIN_SNOWFLAKE_DIR/auth.py" "$LANGCHAIN_SNOWFLAKE_DIR/auth.py.original"
+    fi
+fi
+
 # Apply patches
 echo "🔧 Applying streaming.py patch (ToolCallChunk + fake streaming fix)..."
 cp "$SCRIPT_DIR/langchain_snowflake_streaming_patched.py" "$LANGCHAIN_SNOWFLAKE_DIR/streaming.py"
@@ -120,6 +128,12 @@ cp "$SCRIPT_DIR/langchain_snowflake_utils_patched.py" "$LANGCHAIN_SNOWFLAKE_DIR/
 if [ -d "$CONNECTION_DIR" ]; then
     echo "🔧 Applying _connection/base.py patch (session validation bypass)..."
     cp "$SCRIPT_DIR/langchain_snowflake_connection_base_patched.py" "$CONNECTION_DIR/base.py"
+fi
+
+# Apply auth.py patch for OAuth token authentication
+if [ -f "$LANGCHAIN_SNOWFLAKE_DIR/auth.py" ]; then
+    echo "🔧 Applying auth.py patch (OAuth token authentication fix for SPCS)..."
+    cp "$SCRIPT_DIR/langchain_snowflake_auth_patched.py" "$LANGCHAIN_SNOWFLAKE_DIR/auth.py"
 fi
 
 echo ""
@@ -146,6 +160,9 @@ echo " 10. _connection/base.py: Session validation bypass"
 echo "              Fixes 'Password is empty' error when using key-pair authentication"
 echo " 11. retrievers.py: Use session token auth instead of JWT for Cortex Search"
 echo "              Fixes '401 JWT token is invalid' error"
+echo " 12. auth.py: OAuth token authentication fix for SPCS"
+echo "              Adds 'authenticator=oauth' and 'host' when token is provided"
+echo "              Fixes '251005: User is empty' error in SPCS deployments"
 echo ""
 echo "To revert patches:"
 echo "  ./patches/revert_patches.sh"
