@@ -27,6 +27,7 @@ from langgraph.checkpoint.serde.types import TASKS, ChannelProtocol
 from snowflake.connector import DictCursor
 
 from src.config import is_running_in_spcs, settings
+from src.services.snowflake_session import ResilientSnowflakeConnector
 
 logger = logging.getLogger(__name__)
 
@@ -236,38 +237,71 @@ class AsyncCursor:
 
 
 class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
-    """Async Snowflake checkpointer with native connector and SPCS OAuth support."""
+    """Async Snowflake checkpointer with native connector and SPCS OAuth support.
+    
+    CRITICAL: Uses ResilientSnowflakeConnector to handle OAuth token expiration.
+    The Snowflake connector only reads token_file_path at CONNECTION creation time,
+    not for session renewal. When OAuth tokens expire (~10 min), we must create
+    a NEW connection - the connector's _renew_session() doesn't work for OAuth.
+    """
 
     def __init__(
         self,
-        connection: snowflake.connector.SnowflakeConnection,
         schema: str = "CHECKPOINT_SCHEMA",
     ) -> None:
         super().__init__()
-        self.connection = connection
+        self._resilient_connector: ResilientSnowflakeConnector | None = None
         self.schema = schema
         self.lock = asyncio.Lock()
+        self._init_connector()
+    
+    def _init_connector(self) -> None:
+        """Initialize the resilient connector with appropriate factory."""
+        from src.services.snowflake_session import (
+            ResilientSnowflakeConnector,
+            create_local_connector_connection,
+            create_spcs_connector_connection,
+        )
+        
+        if is_running_in_spcs():
+            logger.info("Checkpointer using SPCS connector (with auto-reconnect on token expiration)")
+            self._resilient_connector = ResilientSnowflakeConnector(
+                connection_factory=create_spcs_connector_connection,
+                max_retries=2,
+            )
+        else:
+            logger.info("Checkpointer using local connector (key-pair auth)")
+            self._resilient_connector = ResilientSnowflakeConnector(
+                connection_factory=create_local_connector_connection,
+                max_retries=2,
+            )
+    
+    @property
+    def connection(self) -> snowflake.connector.SnowflakeConnection:
+        """Get current connection (creates new one if needed or expired)."""
+        if self._resilient_connector is None:
+            self._init_connector()
+        return self._resilient_connector.get_connection()  # type: ignore[union-attr]
 
     @classmethod
     def create_connection(cls) -> snowflake.connector.SnowflakeConnection:
-        """Create Snowflake connection based on environment (SPCS vs local)."""
+        """Create Snowflake connection based on environment (SPCS vs local).
+        
+        DEPRECATED: Use the instance's connection property instead for auto-reconnect.
+        """
         if is_running_in_spcs():
             return cls._create_spcs_connection()
         return cls._create_local_connection()
 
     @classmethod
     def _create_spcs_connection(cls) -> snowflake.connector.SnowflakeConnection:
-        """Create connection using SPCS OAuth token with auto-refresh.
+        """Create connection using SPCS OAuth token.
         
-        Uses token_file_path instead of token so the connector reads fresh tokens
-        automatically from the file that SPCS refreshes every few minutes.
-        This prevents 390114 "Authentication token has expired" errors.
-        
-        Reference: https://docs.snowflake.com/en/developer-guide/snowpark-container-services/additional-considerations-services-jobs
+        DEPRECATED: The checkpointer now uses ResilientSnowflakeConnector internally.
         """
         from src.services.snowflake_session import create_spcs_connector_connection
         
-        logger.info("Creating SPCS connection with token_file_path (auto-refresh enabled)")
+        logger.info("Creating SPCS connection with token_file_path")
         return create_spcs_connector_connection()
 
     @classmethod
@@ -280,16 +314,46 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
 
     @asynccontextmanager
     async def _cursor(self) -> AsyncIterator[AsyncCursor]:
-        """Async context manager for cursor."""
-        async with self.lock:
-            cursor = self.connection.cursor(DictCursor)
-            async_cursor = AsyncCursor(cursor)
-            try:
-                # Ensure warehouse is active for all operations
-                await async_cursor.execute(f"USE WAREHOUSE {settings.snowflake_warehouse}")
-                yield async_cursor
-            finally:
-                await async_cursor.close()
+        """Async context manager for cursor with automatic token expiration handling.
+        
+        CRITICAL: On 390114 token expiration, reconnects and retries.
+        This is necessary because OAuth tokens cannot be renewed like password sessions.
+        """
+        from src.services.snowflake_session import _is_token_expired_error
+        
+        max_retries = 2
+        last_error: Exception | None = None
+        
+        for attempt in range(max_retries):
+            async with self.lock:
+                try:
+                    # Get connection (may create new one if expired)
+                    conn = self.connection
+                    cursor = conn.cursor(DictCursor)
+                    async_cursor = AsyncCursor(cursor)
+                    try:
+                        # Ensure warehouse is active for all operations
+                        await async_cursor.execute(f"USE WAREHOUSE {settings.snowflake_warehouse}")
+                        yield async_cursor
+                        return  # Success - exit the retry loop
+                    finally:
+                        await async_cursor.close()
+                except Exception as e:
+                    last_error = e
+                    if _is_token_expired_error(e) and attempt < max_retries - 1:
+                        logger.warning(
+                            f"Checkpointer: Token expired (attempt {attempt + 1}/{max_retries}), "
+                            f"reconnecting with fresh token..."
+                        )
+                        # Force reconnection - this will read fresh token from file
+                        if self._resilient_connector:
+                            self._resilient_connector.reconnect()
+                    else:
+                        raise
+        
+        # Should not reach here, but satisfy type checker
+        if last_error:
+            raise last_error
 
     async def asetup(self) -> None:
         """Create checkpoint tables if they don't exist."""
@@ -793,12 +857,14 @@ class CustomAsyncSnowflakeSaver(BaseCheckpointSaver):
 
 
 async def create_async_snowflake_checkpointer() -> CustomAsyncSnowflakeSaver:
-    """Create and setup async Snowflake checkpointer."""
-    conn = CustomAsyncSnowflakeSaver.create_connection()
+    """Create and setup async Snowflake checkpointer.
+    
+    The checkpointer now uses ResilientSnowflakeConnector internally,
+    which automatically handles token expiration by creating new connections.
+    """
     checkpointer = CustomAsyncSnowflakeSaver(
-        connection=conn,
         schema=f"{settings.snowflake_database}.CHECKPOINT_SCHEMA",
     )
     await checkpointer.asetup()
-    logger.info("AsyncSnowflakeSaver initialized with persistent Snowflake storage")
+    logger.info("AsyncSnowflakeSaver initialized with resilient connector (auto-reconnect enabled)")
     return checkpointer

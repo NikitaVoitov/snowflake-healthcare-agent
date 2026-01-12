@@ -150,3 +150,4 @@ no_tools_attrs_trace/
 snowflake_connector_python_instrumentation_plan.md
 original_splunk-otel-python-contrib/
 original_langchain_snwoflake_repo/
+splunk_otel_prs_proposal.md

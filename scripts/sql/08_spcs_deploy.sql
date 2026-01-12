@@ -62,7 +62,7 @@ CREATE SERVICE STAGING.HEALTHCARE_AGENTS_SERVICE
 spec:
   containers:
     - name: healthcare-agent
-      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.100
+      image: /healthcare_db/staging/healthcare_images/healthcare-agent:v1.0.104
       env:
         # Only database config needed - SPCS handles auth via OAuth token
         SNOWFLAKE_DATABASE: HEALTHCARE_DB

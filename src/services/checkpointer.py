@@ -18,15 +18,16 @@ def create_checkpointer() -> Any:
 
     Returns:
         CustomAsyncSnowflakeSaver for persistent storage, or MemorySaver as fallback
+    
+    Note: The checkpointer now uses ResilientSnowflakeConnector internally,
+    which automatically handles OAuth token expiration by creating new connections.
     """
     try:
         from src.services.snowflake_checkpointer import CustomAsyncSnowflakeSaver
-
-        conn = CustomAsyncSnowflakeSaver.create_connection()
         from src.config import settings
 
+        # No connection passed - checkpointer creates its own resilient connector
         checkpointer = CustomAsyncSnowflakeSaver(
-            connection=conn,
             schema=f"{settings.snowflake_database}.CHECKPOINT_SCHEMA",
         )
 
