@@ -184,28 +184,47 @@ healthcare/
 │   ├── main.py                          # FastAPI app with lifespan
 │   ├── config.py                        # pydantic-settings with SPCS detection
 │   ├── dependencies.py                  # @lru_cache + Depends factories
+│   ├── exceptions.py                    # Custom exceptions
+│   ├── otel_setup.py                    # OpenTelemetry initialization
 │   ├── routers/
 │   │   └── agent_routes.py              # /query, /stream, /sf-query endpoints
 │   ├── graphs/
 │   │   ├── react_state.py               # HealthcareReActState TypedDict
 │   │   ├── react_workflow.py            # ReAct reasoning loop graph
-│   │   ├── react_prompts.py             # System prompts + tool descriptions
-│   │   └── react_parser.py              # LLM output parsing (orjson + fallbacks)
+│   │   └── react_prompts.py             # System prompts + tool descriptions
 │   ├── models/
+│   │   ├── base.py                      # BaseSchema with camelCase config
 │   │   ├── requests.py                  # QueryRequest (member_id validation)
 │   │   ├── responses.py                 # AgentResponse, StreamEvent
 │   │   └── agent_types.py               # AnalystResultModel, SearchResultModel
 │   ├── tools/
-│   │   └── healthcare_tools.py          # @tool decorated functions (query_member_data, search_knowledge)
-│   ├── otel_setup.py                    # OpenTelemetry initialization (auto-loaded)
+│   │   └── healthcare_tools.py          # @tool decorated functions
+│   ├── middleware/
+│   │   ├── healthcare_prompts.py        # Dynamic prompt middleware
+│   │   └── logging.py                   # Request logging middleware
 │   └── services/
 │       ├── react_agent_service.py       # AgentService.execute(), .stream()
-│       ├── llm_service.py               # ChatSnowflake factory (langchain-snowflake)
+│       ├── llm_service.py               # ChatSnowflake factory
 │       ├── analyst_service.py           # SnowflakeCortexAnalyst factory
 │       ├── search_service.py            # SnowflakeCortexSearchRetriever factory
 │       ├── cortex_tools.py              # AsyncCortexAnalystTool, AsyncCortexSearchTool
-│       ├── snowflake_checkpointer.py    # SQLAlchemy-based LangGraph checkpointer
-│       └── snowflake_session.py         # SPCS token_file_path + resilient session wrapper
+│       ├── checkpointer.py              # LangGraph checkpointer factory
+│       ├── snowflake_checkpointer.py    # CustomAsyncSnowflakeSaver implementation
+│       └── snowflake_session.py         # SPCS OAuth + resilient session wrapper
+│
+├── patches/                                 # langchain-snowflake bug fixes
+│   ├── langchain_snowflake_auth_patched.py          # OAuth token authenticator
+│   ├── langchain_snowflake_base_patched.py          # disable_streaming parameter
+│   ├── langchain_snowflake_connection_base_patched.py # Connection handling
+│   ├── langchain_snowflake_mcp_integration_patched.py # MCP integration
+│   ├── langchain_snowflake_rest_client_patched.py   # SNOWFLAKE_HOST fix
+│   ├── langchain_snowflake_retrievers_patched.py    # Retriever fixes
+│   ├── langchain_snowflake_streaming_patched.py     # ToolCallChunk for streaming
+│   ├── langchain_snowflake_tools_patched.py         # Message format + tool name
+│   ├── langchain_snowflake_utils_patched.py         # Response metadata for OTel
+│   ├── apply_patches.sh                             # Apply patches to .venv
+│   ├── revert_patches.sh                            # Revert patches
+│   └── README.md                                    # Patch documentation
 │
 ├── scripts/
 │   ├── sql/
@@ -217,11 +236,14 @@ healthcare/
 │   │   ├── 08_spcs_deploy.sql           # SPCS deployment
 │   │   ├── 09_semantic_model.sql        # Semantic model stage/upload
 │   │   └── semantic_models/
-│   │       └── healthcare_semantic_model.yaml  # Cortex Analyst NL→SQL model
-│   └── streamlit/
-│       └── payer_assistant.py           # Streamlit chat interface
+│   │       └── healthcare_semantic_model.yaml
 │
-├── tests/                               # tests
+├── streamlit/                           # Streamlit Container Runtime app
+│   ├── app.py                           # SSE streaming + service function fallback
+│   ├── environment.yml                  # Warehouse Runtime dependencies
+│   └── pyproject.toml                   # Container Runtime dependencies
+│
+├── tests/
 │   ├── conftest.py                      # ReAct-specific fixtures
 │   ├── unit/
 │   │   ├── test_models.py
@@ -230,36 +252,9 @@ healthcare/
 │       ├── test_agent_service.py
 │       └── test_real_snowflake.py
 │
-├── patches/
-│   ├── langchain-snowflake/                         # langchain-snowflake bug fixes
-│   │   ├── langchain_snowflake_streaming_patched.py # ToolCallChunk for streaming
-│   │   ├── langchain_snowflake_base_patched.py      # disable_streaming parameter
-│   │   ├── langchain_snowflake_tools_patched.py     # Message format + tool name + inference metadata
-│   │   ├── langchain_snowflake_utils_patched.py     # Response metadata for OTel attributes
-│   │   ├── langchain_snowflake_rest_client_patched.py # SNOWFLAKE_HOST fix
-│   │   └── langchain_snowflake_auth_patched.py      # OAuth token authenticator fix for SPCS
-│   │
-│   └── splunk-otel-python-contrib/                  # OpenTelemetry instrumentation patches
-│       ├── callback_handler_patched.py              # Parent span linking, model extraction, Cortex Inference
-│       ├── span_emitter_patched.py                  # Tool attributes, Snowflake metadata parsing
-│       ├── types_patched.py                         # parent_span field for hierarchy
-│       ├── attributes_patched.py                    # Snowflake Cortex attribute constants
-│       ├── instruments_patched.py                   # Search score histogram, cost metrics
-│       ├── metrics_patched.py                       # Cost metric recording with exemplars
-│       ├── config_patched.py                        # Pricing configuration parsing
-│       ├── environment_variables_patched.py         # Pricing environment variable definitions
-│       ├── apply_patches.sh                         # Apply patches to .venv
-│       ├── revert_patches.sh                        # Revert patches
-│       └── README.md                                # Detailed patch documentation
-│
-├── streamlit/                           # Streamlit Container Runtime app
-│   ├── app.py                           # SSE streaming + service function fallback
-│   └── pyproject.toml                   # Container Runtime dependencies
-│
 ├── pyproject.toml                       # Dependencies (Python 3.11)
-├── langgraph.json                       # LangGraph config (react_healthcare only)
-├── Dockerfile                           # Distroless multi-stage build (191MB)
-├── .dockerignore                        # Excludes tests, docs, .venv from build context
+├── langgraph.json                       # LangGraph config
+├── Dockerfile                           # Distroless multi-stage build
 └── README.md
 ```
 
@@ -275,16 +270,15 @@ healthcare/
 | **Parallel Search** | `asyncio.TaskGroup` searches FAQs, Policies, Transcripts simultaneously |
 | **Conversation Memory** | History persisted via Snowflake checkpointer for multi-turn context |
 | **SPCS OAuth + Auto-Refresh** | Automatic token refresh via `token_file_path` when SPCS OAuth tokens expire |
-| **Modern Error Handling** | Native LangGraph `RetryPolicy` with automatic retries (max 3 attempts) |
-| **Token-Level Streaming** | Real-time LLM output + tool call progress via SSE (patched `langchain-snowflake`) |
+| **Token-Level Streaming** | Real-time LLM output + tool call progress via SSE |
 | **Container Runtime** | Streamlit app runs on SPCS compute pool with internal DNS access |
-| **OpenTelemetry Observability** | Full GenAI tracing with Snowflake Cortex Search metrics via `splunk-otel-python-contrib` |
+| **OpenTelemetry Observability** | GenAI tracing with LangChain instrumentation |
 
 ---
 
 ## OpenTelemetry Observability
 
-This project includes comprehensive **OpenTelemetry instrumentation** for LangChain/LangGraph applications using `splunk-otel-python-contrib` with custom patches for Snowflake Cortex Search observability.
+This project includes **OpenTelemetry instrumentation** for LangChain/LangGraph applications using standard GenAI semantic conventions.
 
 ### Telemetry Architecture
 
@@ -292,13 +286,11 @@ This project includes comprehensive **OpenTelemetry instrumentation** for LangCh
 ┌─────────────────────────────────────────────────────────────────────┐
 │ Healthcare Agent (LangGraph)                                         │
 ├─────────────────────────────────────────────────────────────────────┤
-│  splunk-otel-python-contrib                                          │
-│  ├── LangChainInstrumentor (auto-instrumentation)                   │
+│  LangChainInstrumentor (auto-instrumentation)                        │
 │  ├── Traces: workflow → step → LLM/tool spans                       │
-│  ├── Metrics: gen_ai.tool.search.score histogram                    │
-│  └── Snowflake attributes: request_id, top_score, sources           │
+│  └── GenAI attributes: model, tokens, tool calls                     │
 └──────────────────────────┬──────────────────────────────────────────┘
-                           │ OTLP (gRPC :4317)
+                           │ OTLP (HTTP :4318 GRPC :4317)
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │ OpenTelemetry Collector                                              │
@@ -317,162 +309,29 @@ The instrumentation captures rich telemetry following [OpenTelemetry GenAI Seman
 | `gen_ai.provider.name` | LLM provider | `snowflake` |
 | `gen_ai.tool.name` | Tool function name | `search_knowledge` |
 | `gen_ai.tool.call.id` | Unique tool call ID | `tooluse_cJ0D_A...` |
-| `gen_ai.tool.call.arguments` | Tool input (JSON) | `{"query": "..."}` |
-| `gen_ai.tool.call.result` | Tool output | `[Knowledge Search] Found 9 results...` |
-
-### Snowflake Cortex Search Attributes
-
-Custom span attributes for Snowflake Cortex Search observability:
-
-| Attribute | Description | Example |
-|-----------|-------------|---------|
-| `snowflake.cortex_search.request_id` | Snowflake API request ID | `e14a3c0c-c258-...` |
-| `snowflake.cortex_search.top_score` | Top cosine similarity score | `0.446` |
-| `snowflake.cortex_search.result_count` | Number of search results | `9` |
-| `snowflake.cortex_search.sources` | Search sources queried | `transcripts` |
-| `snowflake.database` | Snowflake database context | `HEALTHCARE_DB` |
-| `snowflake.schema` | Snowflake schema context | `KNOWLEDGE_SCHEMA` |
-| `snowflake.warehouse` | Snowflake warehouse context | `PAYERS_CC_WH` |
-
-### Snowflake Cortex Analyst Attributes
-
-Custom span attributes for Snowflake Cortex Analyst (NL→SQL) observability:
-
-| Attribute | Description | Example |
-|-----------|-------------|---------|
-| `snowflake.database` | Snowflake database | `HEALTHCARE_DB` |
-| `snowflake.schema` | Snowflake schema | `PUBLIC` |
-| `snowflake.warehouse` | Snowflake warehouse | `PAYERS_CC_WH` |
-| `cortex_analyst.semantic_model.name` | Semantic model path | `@HEALTHCARE_DB.STAGING/.../model.yaml` |
-| `cortex_analyst.semantic_model.type` | Model type | `FILE_ON_STAGE` |
-| `cortex_analyst.request_id` | Snowflake request ID | `4867f778-d2da-...` |
-| `cortex_analyst.sql` | Generated SQL query | `SELECT * FROM...` |
-| `cortex_analyst.model_names` | LLM models used | `['claude-4-sonnet']` |
-| `cortex_analyst.question_category` | Query classification | `CLEAR_SQL` |
-| `cortex_analyst.verified_query.name` | Matched VQR name | `member_details` |
-| `cortex_analyst.verified_query.question` | VQR question | `Tell me about member...` |
-| `cortex_analyst.verified_query.sql` | VQR SQL template | `SELECT DISTINCT...` |
-| `cortex_analyst.verified_query.verified_at` | VQR verification timestamp | `1734739200` |
-| `cortex_analyst.verified_query.verified_by` | VQR verifier | `system` |
-| `cortex_analyst.warnings_count` | Number of warnings | `0` |
-
-### Snowflake Cortex Inference Attributes
-
-Attributes for LLM completion calls via `/api/v2/cortex/inference:complete`:
-
-| Attribute | Description | Example |
-|-----------|-------------|---------|
-| `gen_ai.response.id` | Snowflake response ID (OTel GenAI semconv) | `1855de73-2d56-...` |
-| `gen_ai.response.finish_reasons` | Completion finish reasons (OTel GenAI semconv) | `["stop"]` |
-| `snowflake.inference.guard_tokens` | Guard tokens consumed | `15` |
-| `snowflake.database` | Session database context | `HEALTHCARE_DB` |
-| `snowflake.schema` | Session schema context | `PUBLIC` |
-| `snowflake.warehouse` | Session warehouse context | `PAYERS_CC_WH` |
-
-### Search Quality Metric
-
-A histogram metric `gen_ai.tool.search.score` tracks search relevance with pre-configured bucket boundaries for cosine similarity (0.0-1.0):
-
-```
-Name: gen_ai.tool.search.score
-Dimensions:
-  - gen_ai.tool.name: search_knowledge
-  - gen_ai.provider.name: snowflake
-  - snowflake.cortex_search.sources: transcripts
-Buckets: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-```
-
-This enables:
-- **Alerting** on low search quality (p50/p95 < threshold)
-- **Trending** search relevance over time
-- **Correlation** with user satisfaction metrics
-
-### Snowflake Cortex Cost Metrics
-
-Automatic cost estimation metrics for Snowflake Cortex services:
-
-| Metric | Type | Unit | Description |
-|--------|------|------|-------------|
-| `snowflake.cortex_analyst.messages` | Counter | `{message}` | Messages processed by Cortex Analyst |
-| `snowflake.cortex_search.queries` | Counter | `{query}` | Queries processed by Cortex Search |
-| `snowflake.cortex.credits` | Counter | `{credit}` | Total Snowflake credits consumed |
-| `snowflake.cortex.cost` | Counter | `USD` | Estimated cost in USD |
-
-**Pricing Configuration** (via environment variables):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OTEL_SNOWFLAKE_CORTEX_ANALYST_CREDITS_PER_MESSAGE` | `0.067` | Credits per Analyst message |
-| `OTEL_SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_1000_QUERIES` | `1.7` | Credits per 1000 Search queries |
-| `OTEL_SNOWFLAKE_CREDIT_PRICE_USD` | `3.00` | USD price per Snowflake credit |
-
-Adjust these values based on your Snowflake contract pricing.
 
 ### Trace Hierarchy
-
-Proper parent-child span linking shows the full ReAct workflow:
 
 ```
 workflow react_healthcare (trace root)
 ├── step model
 │   └── LLM claude-3-5-sonnet
 ├── step tools
-│   └── tool search_knowledge          ← Snowflake attributes here
+│   └── tool search_knowledge
 └── step model
     └── LLM claude-3-5-sonnet
 ```
 
 ### Setup
 
-1. **Install instrumentation** (included in `pyproject.toml`):
-   ```bash
-   pip install splunk-otel-python-contrib
-   ```
-
-2. **Apply Snowflake patches** (for Cortex Search observability):
-   ```bash
-   cd patches/splunk-otel-python-contrib
-   ./apply_patches.sh /path/to/.venv
-   ```
-
-3. **Configure environment**:
+1. **Configure environment**:
    ```env
    OTEL_SERVICE_NAME=healthcare-agent
-   OTEL_EXPORTER_OTLP_ENDPOINT=http://your-collector:4317
-   OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+   OTEL_EXPORTER_OTLP_ENDPOINT=http://your-collector:4318
+   OTEL_TRACES_EXPORTER=otlp
    ```
 
-4. **OTel is auto-initialized** via `src/otel_setup.py` on application startup.
-
-### Patches for splunk-otel-python-contrib
-
-We contributed patches to fix issues with LangChain/LangGraph instrumentation:
-
-| Fix | Description |
-|-----|-------------|
-| Parent-child span linking | Proper trace hierarchy for LangGraph workflows |
-| Model name extraction | `gen_ai.request.model` for ChatSnowflake |
-| Tool call ID extraction | `gen_ai.tool.call.id` from LangGraph ToolNode |
-| Provider inheritance | `gen_ai.provider.name` propagated to tool spans |
-| Cortex Search attributes | Request ID, scores, sources, connection context |
-| Cortex Analyst attributes | Semantic model, SQL, VQR, question category |
-| Cortex Inference attributes | `gen_ai.response.id`, finish reasons, guard tokens |
-| Streaming token usage | Token counts from `usage_metadata` in streaming responses |
-| Search score histogram | Pre-configured buckets for cosine similarity (0.0-1.0) |
-| Cost metrics | Credits, messages, queries, USD cost estimation |
-| Pricing configuration | Environment variables for custom Snowflake pricing |
-
-**Patched Files:**
-- `callback_handler_patched.py` - Parent span linking, model extraction, Cortex Inference, streaming token usage
-- `span_emitter_patched.py` - Tool attributes, Snowflake metadata parsing
-- `types_patched.py` - `parent_span` field for hierarchy
-- `attributes_patched.py` - Snowflake Cortex attribute constants
-- `instruments_patched.py` - Search score histogram, cost metrics
-- `metrics_patched.py` - Cost metric recording with exemplars
-- `config_patched.py` - Pricing configuration parsing
-- `environment_variables_patched.py` - Pricing environment variable definitions
-
-See `patches/splunk-otel-python-contrib/README.md` for full details.
+2. **OTel is auto-initialized** via `src/otel_setup.py` on application startup.
 
 ---
 
@@ -495,7 +354,7 @@ The Streamlit app supports **real-time SSE streaming** when running on Container
 |---------|------------------|-------------------|
 | **Compute** | SPCS Compute Pool | Virtual Warehouse |
 | **Network** | Internal DNS access | External only |
-| **Streaming** | ✅ SSE via `/agents/stream` | ❌ Service function only |
+| **Streaming** | SSE via `/agents/stream` | Service function only |
 | **Dependencies** | `pyproject.toml` | `environment.yml` |
 
 
@@ -513,7 +372,7 @@ The Streamlit app supports **real-time SSE streaming** when running on Container
 | **Structured Data** | Cortex Analyst API | NL→SQL via semantic model |
 | **Unstructured Data** | Cortex Search | FAQs, policies, call transcripts |
 | **Validation** | Pydantic v2 | Request/response models |
-| **Observability** | splunk-otel-python-contrib | OpenTelemetry GenAI tracing + metrics |
+| **Observability** | OpenTelemetry | GenAI tracing |
 | **Deployment** | SPCS | Snowflake Container Services (Distroless) |
 
 ---
@@ -548,8 +407,8 @@ snow sql -c <your_connection_name> --filename scripts/sql/09_semantic_model.sql
 # Start LangGraph dev server
 langgraph dev --port 8123
 
-# Run tests (79 tests)
-poetry run pytest tests/ -v
+# Run tests
+pytest tests/ -v
 
 # Start FastAPI server locally
 uvicorn src.main:app --reload
@@ -571,13 +430,8 @@ SNOWFLAKE_ROLE=ACCOUNTADMIN
 
 # OpenTelemetry (optional - enables observability)
 OTEL_SERVICE_NAME=healthcare-agent
-OTEL_EXPORTER_OTLP_ENDPOINT=http://your-otel-collector:4317
-OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-
-# Snowflake Cortex Cost Estimation (optional - for cost metrics)
-OTEL_SNOWFLAKE_CORTEX_ANALYST_CREDITS_PER_MESSAGE=0.067
-OTEL_SNOWFLAKE_CORTEX_SEARCH_CREDITS_PER_1000_QUERIES=1.7
-OTEL_SNOWFLAKE_CREDIT_PRICE_USD=3.00
+OTEL_EXPORTER_OTLP_ENDPOINT=http://your-otel-collector:4318
+OTEL_TRACES_EXPORTER=otlp
 ```
 
 ### SPCS Deployment
@@ -597,20 +451,9 @@ docker push ${REGISTRY}/healthcare_db/staging/healthcare_images/healthcare-agent
 snow sql -c <your_connection_name> --filename scripts/sql/08_spcs_deploy.sql
 ```
 
-> **langchain-snowflake Patches (applied in Dockerfile):**
+> **langchain-snowflake Patches:**
 > 
-> We discovered and fixed **4 critical bugs** in `langchain-snowflake` that break SPCS deployment and multi-turn conversations:
-> 
-> | Patch | Bug Fixed | Impact |
-> |-------|-----------|--------|
-> | `auth_patched.py` | Missing `authenticator='oauth'` for token auth | Session creation fails in SPCS (error 251005) |
-> | `streaming_patched.py` | Tool call deltas silently dropped | Streaming fails with tools |
-> | `tools_patched.py` | Text in `content_list` instead of top-level `content` | 400 errors on turn 3+ |
-> | `tools_patched.py` | Tool name defaults to "unknown" | Debugging difficulty |
-> | `base_patched.py` | No `disable_streaming` parameter | Can't control streaming |
-> | `rest_client.py` | `SNOWFLAKE_HOST` not used in SPCS | OAuth auth failures |
-> 
-> See `langchain_snowflake_*_bug.md` files for detailed bug reports (GitHub Issues [#39](https://github.com/langchain-ai/langchain-snowflake/issues/39)).
+> We discovered and fixed several bugs in `langchain-snowflake` that affect SPCS deployment and multi-turn conversations. See `patches/README.md` for details.
 
 ### Test SPCS Service
 
@@ -645,7 +488,6 @@ SELECT STAGING.HEALTHCARE_AGENT_QUERY('What is the policy for prescription cover
 ### Observability
 
 - [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
-- [splunk-otel-python-contrib](https://github.com/signalfx/splunk-otel-python-contrib) - Splunk OpenTelemetry Python contributions
 - [OpenTelemetry Python](https://opentelemetry.io/docs/languages/python/)
 
 ---
